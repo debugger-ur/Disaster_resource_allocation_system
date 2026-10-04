@@ -1,0 +1,4 @@
+id,name,lat,lon,totalBeds,availableBeds,emergencyCapacity,status
+H01,Dehradun City Hospital,30.3200,78.0350,200,45,20,OPERATIONAL
+H04,Rishikesh General Hospital,30.0870,78.2680,120,30,15,OPERATIONAL
+H07,Haridwar Medical Center,29.9450,78.1650,150,60,25,OPERATIONAL

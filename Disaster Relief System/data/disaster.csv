@@ -1,0 +1,4 @@
+id,type,severity,affected,requiredResources,locationName,lat,lon,timestamp,status
+D101,FLOOD,HIGH,120,Ambulance;Supply,Rishikesh,30.0869,78.2676,2024-01-10 10:00:00,ACTIVE
+D102,FLOOD,CRITICAL,250,Ambulance;MedicalTeam;Supply,Dehradun,30.3165,78.0322,2024-01-10 11:30:00,ACTIVE
+D103,EARTHQUAKE,MEDIUM,60,RescueTeam;Equipment,Haridwar,29.9457,78.1642,2024-01-11 09:15:00,ACTIVE
