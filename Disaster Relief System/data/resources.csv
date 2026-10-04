@@ -1,0 +1,10 @@
+id,category,type,quantity,status,lat,lon,locationName,priority,contact
+R101,Ambulance,ALS,1,AVAILABLE,30.3255,78.0431,Dehradun,1,+91-9000000001
+R102,RescueTeam,Flood Rescue,10,AVAILABLE,30.0869,78.2676,Rishikesh,1,+91-9000000002
+R103,MedicalTeam,Trauma Team,5,AVAILABLE,30.3165,78.0400,Dehradun,1,+91-9000000003
+R104,Ambulance,BLS,1,AVAILABLE,29.9457,78.1642,Haridwar,2,+91-9000000004
+R105,Supply,Food,500,AVAILABLE,30.0869,78.2676,Rishikesh,3,N/A
+R106,Supply,Water,1000,AVAILABLE,29.9457,78.1642,Haridwar,3,N/A
+R107,Equipment,HeavyMachinery,2,AVAILABLE,30.3165,78.0500,Dehradun,2,+91-9000000007
+R108,Ambulance,ALS,1,AVAILABLE,30.4500,77.9000,Mussoorie,2,+91-9000000008
+R109,RescueTeam,Earthquake Rescue,8,AVAILABLE,29.9450,78.1700,Haridwar,1,+91-9000000009
