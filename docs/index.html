@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DRRAS — Disaster Relief Resource Allocation System</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="app-header">
+  <h1>🚨 Disaster Relief Resource Allocation System</h1>
+  <p class="subtitle">Automatic Haversine Distance Calculation &amp; Nearest-Resource Allocation — Browser Demo</p>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-target="dashboard">Dashboard</button>
+  <button class="tab-btn" data-target="disasters">Report / View Disasters</button>
+  <button class="tab-btn" data-target="resources">Resources</button>
+  <button class="tab-btn" data-target="hospitals">Hospitals</button>
+  <button class="tab-btn" data-target="shelters">Shelters</button>
+  <button class="tab-btn" data-target="allocations">Allocations</button>
+  <button class="tab-btn" data-target="route">Route Finder</button>
+  <button class="tab-btn" data-target="search">Search</button>
+</nav>
+
+<main>
+
+  <!-- DASHBOARD -->
+  <section id="dashboard" class="panel">
+    <h2>System Statistics</h2>
+    <div id="statsGrid" class="stats-grid"></div>
+    <button id="refreshStatsBtn" class="btn">Refresh</button>
+  </section>
+
+  <!-- DISASTERS -->
+  <section id="disasters" class="panel hidden">
+    <h2>Report New Disaster</h2>
+    <form id="disasterForm" class="form-grid">
+      <label>Disaster ID <input type="text" id="dId" required></label>
+      <label>Type
+        <select id="dType">
+          <option>FLOOD</option><option>EARTHQUAKE</option><option>FIRE</option>
+          <option>LANDSLIDE</option><option>INDUSTRIAL_ACCIDENT</option><option>OTHER</option>
+        </select>
+      </label>
+      <label>Severity
+        <select id="dSeverity">
+          <option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option>
+        </select>
+      </label>
+      <label>Affected People <input type="number" id="dAffected" min="0" required></label>
+      <label>Location Name <input type="text" id="dLocation" required></label>
+      <label>Latitude <input type="number" step="any" id="dLat" min="-90" max="90" required></label>
+      <label>Longitude <input type="number" step="any" id="dLon" min="-180" max="180" required></label>
+      <fieldset class="checkbox-group">
+        <legend>Required Resources</legend>
+        <label><input type="checkbox" value="Ambulance"> Ambulance</label>
+        <label><input type="checkbox" value="RescueTeam"> Rescue Team</label>
+        <label><input type="checkbox" value="MedicalTeam"> Medical Team</label>
+        <label><input type="checkbox" value="Equipment"> Equipment</label>
+        <label><input type="checkbox" value="Supply"> Supply</label>
+      </fieldset>
+      <button type="submit" class="btn btn-primary">Report Disaster</button>
+    </form>
+
+    <div id="disasterReportResult"></div>
+
+    <h2>Active Disasters</h2>
+    <div id="disasterList" class="card-list"></div>
+  </section>
+
+  <!-- RESOURCES -->
+  <section id="resources" class="panel hidden">
+    <h2>Add Resource</h2>
+    <form id="resourceForm" class="form-grid">
+      <label>Resource ID <input type="text" id="rId" required></label>
+      <label>Category
+        <select id="rCategory">
+          <option>Ambulance</option><option>RescueTeam</option><option>MedicalTeam</option>
+          <option>Equipment</option><option>Supply</option>
+        </select>
+      </label>
+      <label>Type/Description <input type="text" id="rType" required></label>
+      <label>Quantity <input type="number" id="rQuantity" min="0" required></label>
+      <label>Latitude <input type="number" step="any" id="rLat" min="-90" max="90" required></label>
+      <label>Longitude <input type="number" step="any" id="rLon" min="-180" max="180" required></label>
+      <label>Location Name <input type="text" id="rLocation" required></label>
+      <label>Priority (1=highest, 5=lowest) <input type="number" id="rPriority" min="1" max="5" value="1" required></label>
+      <label>Contact Info <input type="text" id="rContact"></label>
+      <button type="submit" class="btn btn-primary">Add Resource</button>
+    </form>
+
+    <h2>All Resources</h2>
+    <button id="exportResourcesBtn" class="btn">Export CSV</button>
+    <table class="data-table" id="resourceTable">
+      <thead><tr><th>ID</th><th>Category</th><th>Type</th><th>Qty</th><th>Status</th><th>Location</th><th>Priority</th><th>Action</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- HOSPITALS -->
+  <section id="hospitals" class="panel hidden">
+    <h2>Add Hospital</h2>
+    <form id="hospitalForm" class="form-grid">
+      <label>Hospital ID <input type="text" id="hId" required></label>
+      <label>Name <input type="text" id="hName" required></label>
+      <label>Latitude <input type="number" step="any" id="hLat" min="-90" max="90" required></label>
+      <label>Longitude <input type="number" step="any" id="hLon" min="-180" max="180" required></label>
+      <label>Total Beds <input type="number" id="hTotal" min="0" required></label>
+      <label>Available Beds <input type="number" id="hAvailable" min="0" required></label>
+      <label>Emergency Capacity <input type="number" id="hEmergency" min="0" required></label>
+      <button type="submit" class="btn btn-primary">Add Hospital</button>
+    </form>
+
+    <h2>Find Nearest Hospitals</h2>
+    <select id="hospitalDisasterSelect"></select>
+    <button id="findHospitalsBtn" class="btn">Find Nearest</button>
+    <div id="nearestHospitalsResult"></div>
+
+    <h2>All Hospitals</h2>
+    <button id="exportHospitalsBtn" class="btn">Export CSV</button>
+    <table class="data-table" id="hospitalTable">
+      <thead><tr><th>ID</th><th>Name</th><th>Total Beds</th><th>Available</th><th>Emergency Cap</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- SHELTERS -->
+  <section id="shelters" class="panel hidden">
+    <h2>Add Shelter</h2>
+    <form id="shelterForm" class="form-grid">
+      <label>Shelter ID <input type="text" id="sId" required></label>
+      <label>Name <input type="text" id="sName" required></label>
+      <label>Latitude <input type="number" step="any" id="sLat" min="-90" max="90" required></label>
+      <label>Longitude <input type="number" step="any" id="sLon" min="-180" max="180" required></label>
+      <label>Capacity <input type="number" id="sCapacity" min="0" required></label>
+      <label>Occupied <input type="number" id="sOccupied" min="0" value="0" required></label>
+      <button type="submit" class="btn btn-primary">Add Shelter</button>
+    </form>
+
+    <h2>Find Nearest Shelters</h2>
+    <select id="shelterDisasterSelect"></select>
+    <button id="findSheltersBtn" class="btn">Find Nearest</button>
+    <div id="nearestSheltersResult"></div>
+
+    <h2>All Shelters</h2>
+    <button id="exportSheltersBtn" class="btn">Export CSV</button>
+    <table class="data-table" id="shelterTable">
+      <thead><tr><th>ID</th><th>Name</th><th>Capacity</th><th>Occupied</th><th>Available</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- ALLOCATIONS -->
+  <section id="allocations" class="panel hidden">
+    <h2>Allocate Resources</h2>
+    <select id="allocateDisasterSelect"></select>
+    <button id="allocateBtn" class="btn btn-primary">Run Allocation</button>
+    <div id="allocationResult"></div>
+
+    <h2>Allocation History</h2>
+    <button id="exportAllocationsBtn" class="btn">Export CSV</button>
+    <table class="data-table" id="allocationTable">
+      <thead><tr><th>Alloc ID</th><th>Disaster</th><th>Resource</th><th>Category</th><th>Distance</th><th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- ROUTE FINDER -->
+  <section id="route" class="panel hidden">
+    <h2>Simulated Road Network — Dijkstra Shortest Path</h2>
+    <p class="disclaimer">⚠ This graph is built from nearest-neighbour straight-line (Haversine) distances between known locations — it is a <b>simulated</b> road network, not live GPS/road-API data.</p>
+    <div class="form-grid">
+      <label>Source <select id="routeSource"></select></label>
+      <label>Destination <select id="routeDestination"></select></label>
+    </div>
+    <button id="findRouteBtn" class="btn btn-primary">Find Shortest Route</button>
+    <div id="routeResult"></div>
+  </section>
+
+  <!-- SEARCH -->
+  <section id="search" class="panel hidden">
+    <h2>Search Records</h2>
+    <div class="form-grid">
+      <label>Disaster ID <input type="text" id="searchDisasterId"></label>
+      <button id="searchDisasterBtn" class="btn">Search Disaster</button>
+    </div>
+    <div class="form-grid">
+      <label>Resource ID <input type="text" id="searchResourceId"></label>
+      <button id="searchResourceBtn" class="btn">Search Resource</button>
+    </div>
+    <div class="form-grid">
+      <label>Location Keyword <input type="text" id="searchKeyword"></label>
+      <button id="searchKeywordBtn" class="btn">Search</button>
+    </div>
+    <div id="searchResult"></div>
+  </section>
+
+</main>
+
+<footer class="app-footer">
+  <p>Academic PBL Project — Distance calculated using the Haversine formula from stored latitude/longitude. No live GPS or road-API integration.</p>
+  <p><button id="resetDataBtn" class="btn btn-danger">Reset All Data</button></p>
+</footer>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
