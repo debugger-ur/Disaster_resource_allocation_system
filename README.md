@@ -29,6 +29,9 @@ Existing logistics/inventory-management tools are generic and not disaster-speci
 - **Data structures:** Graphs (relief-center/zone network), priority queues / binary heaps (urgency ranking), linked lists (request queues), hash tables (fast inventory lookup)
 - **OOP design:** `Resource` base class with `Food`, `Medical`, `Shelter` subclasses (inheritance & polymorphism); `Volunteer` and `Request` classes; STL containers (`vector`, `map`, `priority_queue`)
 - **Database:** SQLite (resource inventories, requests, allocation logs)
+- **C++ persistence:** CSV files through `FileManager` (the current console implementation does not link SQLite)
+- **Browser demo persistence:** `localStorage` for its sample operational data
+- **Admin request service:** Python 3 standard library + SQLite for shared public submissions and admin decisions
 - **IDE:** VS Code
 - **Version control:** Git / GitHub
 
@@ -39,37 +42,45 @@ Existing logistics/inventory-management tools are generic and not disaster-speci
 - A C++ compiler supporting C++17 or later (e.g. `g++`, `clang++`)
 - SQLite3 development libraries (`libsqlite3-dev` on Debian/Ubuntu)
 - CMake (recommended) or Make
+- CMake
 - Git
+- Python 3.9+ (only needed to run the web request/admin service; it uses the standard library and SQLite)
 
 ### Clone the repository
 ```bash
+
 git clone https://github.com/<org-or-user>/disaster-resource-allocation-system.git
 cd disaster-resource-allocation-system
 ```
 
 ### Build
+The CMake project is in `Disaster Relief System/`:
 ```bash
 mkdir build && cd build
 cmake ..
 make
+cmake -S "Disaster Relief System" -B "Disaster Relief System/build"
+cmake --build "Disaster Relief System/build"
 ```
 
 ### Run
+Run the console application with its working directory set to `Disaster Relief System/` so its relative `data/` paths resolve:
 ```bash
 ./disaster_resource_allocation
+cd "Disaster Relief System"
+./build/drras
 ```
 
 ## System Architecture
-
 The system is organized into four core-system modules sitting between input sources and end users:
 
 1. **Request Manager** — validates and captures incoming relief requests, assigns priority based on urgency, and adds them to the queue.
 2. **Priority Queue** — a binary heap / tree structure that dynamically re-orders requests by urgency and time.
 3. **Allocation Engine** — performs graph-based matching between requests and resources (shortest path / min cost), checks resource and volunteer availability, and generates the allocation plan.
 4. **Resource Database** — stores resource inventory, relief centers, volunteers, and allocation logs (backed by SQLite, plus graph, inventory, and log data).
+4. **Persistence layers** — the C++ console program writes CSV through `FileManager`; the browser demo keeps its operational sample data in per-browser `localStorage`; the web request-review service uses SQLite as the shared store for public submissions and admin decisions.
 
 **Inputs:** relief requests from affected zones, resource availability from centers/warehouses, location & road/zone accessibility data, volunteer availability.
-
 **Outputs:** dispatch plan, allocation report, route plan (optimal paths), inventory status, and a performance report — consumed by relief coordinators, NGOs/agencies, government authorities, field volunteers, and citizens.
 
 ## Major Features / Modules
@@ -96,7 +107,41 @@ The system is organized into four core-system modules sitting between input sour
 | Phase IV | 16/10/2026 – 31/10/2026 | Test on simulated disaster scenarios and refine allocation accuracy | ⏳ Not Started |
 | Phase V | 01/11/2026 – 08/11/2026 | Final demonstration and documentation | ⏳ Not Started |
 
-*As of the latest update, the project is in **Phase II**, actively implementing the core data structures and OOP class hierarchy.*
+As of the latest update, the project is in **Phase II**, actively implementing the core data structures and OOP class hierarchy.*
+
+## Web Admin Module: Request Review
+
+A password-protected web admin module is available at `/admin`. The public relief-request form now posts to the same server-side API, so submissions from different browsers are visible in one dashboard. New requests start as `pending`; an admin can accept or reject them, and each decision is stored with a timestamp.
+
+### Run locally
+
+The API and static site use only Python's standard library. From the repository root:
+
+```bash
+# Create (or reset) the one admin password. Use at least 12 characters.
+python3 backend/admin_server.py --set-password
+
+# Start the web UI and API on port 8000.
+python3 backend/admin_server.py
+```
+
+Open `http://localhost:8000/` for the public site and `http://localhost:8000/admin` for admin sign-in. The SQLite file is created at `backend/data/drras.sqlite3` and is intentionally ignored by Git. Set `DRRAS_DB_PATH=/path/to/requests.sqlite3` to select another durable location; use that same value for password setup and when starting the server. Run `python3 -m unittest discover -s backend/tests -v` for backend tests.
+
+### Routes and protection
+
+- `POST /api/requests` — validates and saves a public request as pending.
+- `POST /api/admin/login` — verifies the configured password and issues an opaque, server-side session cookie.
+- `GET /api/admin/session` and `GET /api/admin/requests` — require a valid admin session.
+- `PATCH /api/admin/requests/{id}` with `{"status":"accepted"}` or `{"status":"rejected"}` — requires the admin session and a CSRF token; a request can only be reviewed once.
+- `POST /api/admin/logout` — revokes the session.
+
+Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes, not in the browser or source. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, expire after eight hours, and admin mutations require a CSRF token. Login attempts are rate-limited. This small `http.server` implementation is a starter/demo, not a hardened public production server. Before public deployment, port the handlers to a production-grade application server (or a hardened gateway with strict request limits), use HTTPS and set `DRRAS_COOKIE_SECURE=1`, serve `/` and `/api` on the same origin, and configure backups/monitoring. A static-only host such as GitHub Pages cannot run this Python API by itself.
+
+### Connecting request storage to the rest of the project
+
+The checked-in project did not have a shared web database: `docs/js/storage.js` stored the browser demo data in that browser's `localStorage`, while the separate C++ console program persists records as CSV using `FileManager`. A server cannot read a visitor's `localStorage`, so the request form was wired to this SQLite-backed API; that SQLite database is now the shared source of truth for web requests and admin review. Existing browser-local records are not automatically imported, and the admin decision does not automatically dispatch resources or write into the C++ CSV files.
+
+If you already have a server-side request database, keep the browser route contract above and replace the persistence methods in `backend/admin_server.py` (`Store.create_request`, `Store.list_requests`, and `Store.set_request_status`) with calls to that database/repository. Keep the password/session/CSRF checks in the HTTP layer. If accepted requests must become operational C++ disasters, add an explicit promotion/export adapter after acceptance; do not point both stores at files that are being rewritten independently. Back up the SQLite file and restrict filesystem access to the service account.
 
 ## Assumptions
 
