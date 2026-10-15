@@ -1,4 +1,4 @@
- { box-sizing: border-box; }
+* { box-sizing: border-box; }
 body {
   font-family: 'Segoe UI', Arial, sans-serif;
   margin: 0; background: #f2f4f7; color: #1f2937;
@@ -20,6 +20,14 @@ body {
 .tab-btn:hover { background: #374151; color: #fff; }
 .tab-btn.active { background: #b91c1c; color: #fff; }
 
+.admin-link {
+  align-self: center; margin: 4px 8px 4px auto; padding: 8px 12px;
+  border: 1px solid #586170; border-radius: 5px; color: #f3f4f6;
+  font-size: 0.82rem; font-weight: 600; text-decoration: none; white-space: nowrap;
+}
+.admin-link:hover { background: #374151; color: #fff; }
+.request-note { margin: 8px 0 14px; color: #4b5563; font-size: 0.86rem; line-height: 1.5; }
+#disasterForm button:disabled { opacity: 0.65; cursor: wait; }
 main { padding: 20px 30px; max-width: 1100px; margin: 0 auto; }
 .panel { display: block; }
 .panel.hidden { display: none; }
