@@ -80,6 +80,15 @@ export function populateLocationSelect(selectEl, locations) {
   selectEl.innerHTML = locations.map((loc) => `<option value="${loc}">${loc}</option>`).join("");
 }
 
+function escapeHTML(value) {
+  return String(value).replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
+  })[character]);
+}
+
 export function showDistanceAnalysis(container, title, lines) {
-  container.innerHTML = `<div class="result-box">-----------------------------------------\n${title}\n-----------------------------------------\n${lines.join("\n")}\n-----------------------------------------</div>`;
+  const content = ["-----------------------------------------", title, "-----------------------------------------", ...lines, "-----------------------------------------"]
+    .map(escapeHTML)
+    .join("\n");
+  container.innerHTML = `<div class="result-box">${content}</div>`;
 }
