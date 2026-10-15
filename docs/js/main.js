@@ -67,28 +67,41 @@ function refreshAll() {
   ui.populateLocationSelect(ui.el("routeDestination"), routeManager.listLocations());
 }
 
-// ================= DISASTER FORM =================
-ui.el("disasterForm").addEventListener("submit", (e) => {
+// ================= PUBLIC REQUEST FORM =================
+ui.el("disasterForm").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const submitButton = e.submitter || e.currentTarget.querySelector('button[type="submit"]');
+  const originalLabel = submitButton.textContent;
+  submitButton.disabled = true;
+  submitButton.textContent = "Submitting…";
+
   try {
-    const required = [...document.querySelectorAll("#disasterForm .checkbox-group input:checked")].map((c) => c.value);
-    const disaster = disasterManager.add({
-      id: ui.el("dId").value.trim(),
+    const payload = {
       type: ui.el("dType").value,
       severity: ui.el("dSeverity").value,
       affectedPeople: Number(ui.el("dAffected").value),
-      requiredResources: required,
+      requiredResources: [...document.querySelectorAll("#disasterForm .checkbox-group input:checked")].map((c) => c.value),
       locationName: ui.el("dLocation").value.trim(),
       latitude: Number(ui.el("dLat").value),
       longitude: Number(ui.el("dLon").value),
+    };
+    const response = await fetch("/api/requests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      cache: "no-store",
     });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "The request could not be submitted.");
+    const request = result.request;
 
-    // Automatic nearest hospital/shelter distance analysis
-    const nearestHospitals = sortByDistance(hospitalManager.getAll(), disaster.latitude, disaster.longitude).slice(0, 3);
-    const nearestShelters = sortByDistance(shelterManager.getAll(), disaster.latitude, disaster.longitude).slice(0, 3);
-
+    // Requests are centrally stored and reviewed before entering operations.
+    const nearestHospitals = sortByDistance(hospitalManager.getAll(), request.latitude, request.longitude).slice(0, 3);
+    const nearestShelters = sortByDistance(shelterManager.getAll(), request.latitude, request.longitude).slice(0, 3);
     const lines = [
-      `Disaster Location : ${disaster.locationName}`,
+      `Request ID       : ${request.id}`,
+      `Review status    : PENDING`,
+      `Location         : ${request.locationName}`,
       ``,
       `Nearest Hospitals:`,
       ...nearestHospitals.map((h, i) => `  ${i + 1}. ${h.item.id} (${h.item.name}) -> ${h.distance.toFixed(1)} km`),
@@ -96,11 +109,17 @@ ui.el("disasterForm").addEventListener("submit", (e) => {
       `Nearest Shelters:`,
       ...nearestShelters.map((s, i) => `  ${i + 1}. ${s.item.id} (${s.item.name}) -> ${s.distance.toFixed(1)} km`),
     ];
-    ui.showDistanceAnalysis(ui.el("disasterReportResult"), "DISASTER REPORTED — DISTANCE ANALYSIS", lines);
-
+    ui.showDistanceAnalysis(ui.el("disasterReportResult"), "REQUEST SUBMITTED — PENDING ADMIN REVIEW", lines);
     e.target.reset();
-    refreshAll();
-  } catch (err) { ui.showToast(err.message, true); }
+  } catch (err) {
+    const message = err instanceof TypeError
+      ? "Could not reach the request service. Start the DRRAS admin server and try again."
+      : err.message;
+    ui.showToast(message, true);
+  } finally {
+    submitButton.disabled = false;
+    submitButton.textContent = originalLabel;
+  }
 });
 
 // ================= RESOURCE FORM =================
