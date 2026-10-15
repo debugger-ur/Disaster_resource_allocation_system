@@ -26,10 +26,11 @@
 *.a
 *.lib
 
-
+# Executables
 *.exe
 *.out
 *.app
+
 # Admin backend runtime data (never commit credentials, sessions, or requests)
 backend/data/
 *.sqlite3
