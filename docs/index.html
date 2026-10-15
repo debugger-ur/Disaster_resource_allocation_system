@@ -22,6 +22,7 @@
   <button class="tab-btn" data-target="allocations">Allocations</button>
   <button class="tab-btn" data-target="route">Route Finder</button>
   <button class="tab-btn" data-target="search">Search</button>
+  <a class="admin-link" href="/admin">Admin sign in <span aria-hidden="true">↗</span></a>
 </nav>
 
 <main>
@@ -35,9 +36,9 @@
 
   <!-- DISASTERS -->
   <section id="disasters" class="panel hidden">
-    <h2>Report New Disaster</h2>
+    <h2>Submit a Relief Request</h2>
+    <p class="request-note">Submissions are saved to the shared request service and start as <b>Pending</b> until an admin reviews them.</p>
     <form id="disasterForm" class="form-grid">
-      <label>Disaster ID <input type="text" id="dId" required></label>
       <label>Type
         <select id="dType">
           <option>FLOOD</option><option>EARTHQUAKE</option><option>FIRE</option>
@@ -61,12 +62,13 @@
         <label><input type="checkbox" value="Equipment"> Equipment</label>
         <label><input type="checkbox" value="Supply"> Supply</label>
       </fieldset>
-      <button type="submit" class="btn btn-primary">Report Disaster</button>
+      <button type="submit" class="btn btn-primary">Submit Request</button>
     </form>
 
     <div id="disasterReportResult"></div>
 
-    <h2>Active Disasters</h2>
+    <h2>Operational Demo Disasters</h2>
+    <p class="request-note">These sample operational records remain in this browser's local storage. Incoming public requests are reviewed separately in the <a href="/admin">Admin dashboard</a>.</p>
     <div id="disasterList" class="card-list"></div>
   </section>
 
