@@ -28,7 +28,6 @@ Existing logistics/inventory-management tools are generic and not disaster-speci
 - **Language:** C (core data structures), C++ (OOP layer, STL)
 - **Data structures:** Graphs (relief-center/zone network), priority queues / binary heaps (urgency ranking), linked lists (request queues), hash tables (fast inventory lookup)
 - **OOP design:** `Resource` base class with `Food`, `Medical`, `Shelter` subclasses (inheritance & polymorphism); `Volunteer` and `Request` classes; STL containers (`vector`, `map`, `priority_queue`)
-- **Database:** SQLite (resource inventories, requests, allocation logs)
 - **C++ persistence:** CSV files through `FileManager` (the current console implementation does not link SQLite)
 - **Browser demo persistence:** `localStorage` for its sample operational data
 - **Admin request service:** Python 3 standard library + SQLite for shared public submissions and admin decisions
@@ -40,15 +39,12 @@ Existing logistics/inventory-management tools are generic and not disaster-speci
 
 ### Prerequisites
 - A C++ compiler supporting C++17 or later (e.g. `g++`, `clang++`)
-- SQLite3 development libraries (`libsqlite3-dev` on Debian/Ubuntu)
-- CMake (recommended) or Make
 - CMake
 - Git
 - Python 3.9+ (only needed to run the web request/admin service; it uses the standard library and SQLite)
 
 ### Clone the repository
 ```bash
-
 git clone https://github.com/<org-or-user>/disaster-resource-allocation-system.git
 cd disaster-resource-allocation-system
 ```
@@ -56,9 +52,6 @@ cd disaster-resource-allocation-system
 ### Build
 The CMake project is in `Disaster Relief System/`:
 ```bash
-mkdir build && cd build
-cmake ..
-make
 cmake -S "Disaster Relief System" -B "Disaster Relief System/build"
 cmake --build "Disaster Relief System/build"
 ```
@@ -66,21 +59,21 @@ cmake --build "Disaster Relief System/build"
 ### Run
 Run the console application with its working directory set to `Disaster Relief System/` so its relative `data/` paths resolve:
 ```bash
-./disaster_resource_allocation
 cd "Disaster Relief System"
 ./build/drras
 ```
 
 ## System Architecture
+
 The system is organized into four core-system modules sitting between input sources and end users:
 
 1. **Request Manager** — validates and captures incoming relief requests, assigns priority based on urgency, and adds them to the queue.
 2. **Priority Queue** — a binary heap / tree structure that dynamically re-orders requests by urgency and time.
 3. **Allocation Engine** — performs graph-based matching between requests and resources (shortest path / min cost), checks resource and volunteer availability, and generates the allocation plan.
-4. **Resource Database** — stores resource inventory, relief centers, volunteers, and allocation logs (backed by SQLite, plus graph, inventory, and log data).
 4. **Persistence layers** — the C++ console program writes CSV through `FileManager`; the browser demo keeps its operational sample data in per-browser `localStorage`; the web request-review service uses SQLite as the shared store for public submissions and admin decisions.
 
 **Inputs:** relief requests from affected zones, resource availability from centers/warehouses, location & road/zone accessibility data, volunteer availability.
+
 **Outputs:** dispatch plan, allocation report, route plan (optimal paths), inventory status, and a performance report — consumed by relief coordinators, NGOs/agencies, government authorities, field volunteers, and citizens.
 
 ## Major Features / Modules
@@ -107,7 +100,7 @@ The system is organized into four core-system modules sitting between input sour
 | Phase IV | 16/10/2026 – 31/10/2026 | Test on simulated disaster scenarios and refine allocation accuracy | ⏳ Not Started |
 | Phase V | 01/11/2026 – 08/11/2026 | Final demonstration and documentation | ⏳ Not Started |
 
-As of the latest update, the project is in **Phase II**, actively implementing the core data structures and OOP class hierarchy.*
+*As of the latest update, the project is in **Phase II**, actively implementing the core data structures and OOP class hierarchy.*
 
 ## Web Admin Module: Request Review
 
