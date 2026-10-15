@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#102a43">
+  <title>Admin · Disaster Relief Resource Allocation System</title>
+  <link rel="stylesheet" href="/css/admin.css">
+  <script type="module" src="/js/admin.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Back to the DRRAS website">
+      <span class="brand-mark" aria-hidden="true">DR</span>
+      <span>Disaster Relief <span class="brand-muted">/ Admin</span></span>
+    </a>
+    <a class="back-link" href="/">Back to public site <span aria-hidden="true">↗</span></a>
+  </header>
+
+  <main class="page-shell">
+    <section id="loginSection" class="login-layout" aria-labelledby="loginHeading">
+      <div class="intro-copy">
+        <p class="eyebrow">CONTROL ROOM</p>
+        <h1 id="loginHeading">Admin sign in</h1>
+        <p>Review incoming relief requests and record an acceptance or rejection decision.</p>
+        <div class="security-note">
+          <span class="security-icon" aria-hidden="true">⌑</span>
+          <span>Admin actions are protected by a server-side session. Your password is never stored in this page.</span>
+        </div>
+      </div>
+      <form id="loginForm" class="login-card" autocomplete="on">
+        <div class="card-icon" aria-hidden="true">↗</div>
+        <h2>Welcome back</h2>
+        <p class="muted">Enter the admin password to continue.</p>
+        <label for="adminPassword">Admin password</label>
+        <input id="adminPassword" name="password" type="password" autocomplete="current-password"
+               minlength="12" maxlength="1024" required>
+        <button id="loginButton" class="button button-primary button-wide" type="submit">Sign in</button>
+        <p id="loginMessage" class="message" role="alert" aria-live="polite"></p>
+        <p class="login-help">No default password is configured. The site operator creates it on the server.</p>
+      </form>
+    </section>
+
+    <section id="dashboardSection" hidden aria-labelledby="dashboardHeading">
+      <div class="dashboard-heading">
+        <div>
+          <p class="eyebrow">REQUEST OPERATIONS</p>
+          <h1 id="dashboardHeading">Request dashboard</h1>
+          <p class="muted">Review submissions from the public request form. Decisions are saved centrally.</p>
+        </div>
+        <div class="heading-actions">
+          <button id="refreshButton" class="button button-quiet" type="button">↻ <span>Refresh</span></button>
+          <button id="logoutButton" class="button button-quiet" type="button">Sign out</button>
+        </div>
+      </div>
+
+      <div class="summary-grid" aria-label="Request totals">
+        <article class="summary-card summary-pending">
+          <span class="summary-label">Pending</span>
+          <strong id="pendingCount">0</strong>
+          <span class="summary-caption">Awaiting review</span>
+        </article>
+        <article class="summary-card summary-accepted">
+          <span class="summary-label">Accepted</span>
+          <strong id="acceptedCount">0</strong>
+          <span class="summary-caption">Approved by admin</span>
+        </article>
+        <article class="summary-card summary-rejected">
+          <span class="summary-label">Rejected</span>
+          <strong id="rejectedCount">0</strong>
+          <span class="summary-caption">Declined by admin</span>
+        </article>
+        <article class="summary-card summary-total">
+          <span class="summary-label">All requests</span>
+          <strong id="totalCount">0</strong>
+          <span class="summary-caption">Across all statuses</span>
+        </article>
+      </div>
+
+      <section class="requests-panel" aria-labelledby="requestsHeading">
+        <div class="panel-heading">
+          <div>
+            <h2 id="requestsHeading">Submitted requests</h2>
+            <p id="requestCount" class="muted">Loading requests…</p>
+          </div>
+          <label class="filter-control" for="statusFilter">
+            <span>Status</span>
+            <select id="statusFilter">
+              <option value="all">All requests</option>
+              <option value="pending">Pending</option>
+              <option value="accepted">Accepted</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </label>
+        </div>
+
+        <p id="dashboardMessage" class="dashboard-message" role="status" aria-live="polite"></p>
+        <div class="table-scroll">
+          <table class="request-table">
+            <thead>
+              <tr>
+                <th scope="col">Request</th>
+                <th scope="col">Location</th>
+                <th scope="col">Resources needed</th>
+                <th scope="col">Submitted</th>
+                <th scope="col">Decision</th>
+                <th scope="col"><span class="visually-hidden">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="requestRows"></tbody>
+          </table>
+          <div id="emptyState" class="empty-state" hidden>
+            <div class="empty-icon" aria-hidden="true">⌁</div>
+            <h3>No requests to show</h3>
+            <p>New public submissions will appear here automatically.</p>
+          </div>
+        </div>
+      </section>
+      <p class="data-note">An approval decision is recorded in the request database. It does not automatically dispatch supplies.</p>
+    </section>
+  </main>
+
+  <footer class="page-footer">DRRAS · Admin access</footer>
+</body>
+</html>
