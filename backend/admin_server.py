@@ -1,0 +1,688 @@
+#!/usr/bin/env python3
+"""DRRAS request-review service.
+
+Serves the static site in ``docs/`` and the JSON API that the public relief
+request form and the admin dashboard talk to. Standard library only (plus the
+sqlite3 module that ships with CPython), so it runs anywhere Python runs.
+
+Usage:
+    python3 backend/admin_server.py --set-password   # create/reset admin password
+    python3 backend/admin_server.py                  # serve on http://0.0.0.0:8000
+
+Environment:
+    DRPAS/DRRAS_DB_PATH      absolute SQLite path (shared by password setup + server)
+    DRRAS_COOKIE_SECURE      "1" to mark the session cookie Secure (use behind HTTPS)
+    DRRAS_PORT / DRRAS_HOST  defaults for the bind address
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import hashlib
+import hmac
+import html
+import json
+import os
+import secrets
+import sqlite3
+import sys
+import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
+from http.cookies import SimpleCookie
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import unquote
+
+BACKEND_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BACKEND_DIR.parent
+STATIC_ROOT = REPO_ROOT / "docs"
+DEFAULT_DB_PATH = BACKEND_DIR / "data" / "drras.sqlite3"
+
+SESSION_COOKIE_NAME = "drras_session"
+SESSION_LIFETIME = timedelta(hours=8)
+MIN_PASSWORD_LENGTH = 12
+PBKDF2_ITERATIONS = 210_000
+MAX_BODY_BYTES = 64 * 1024
+
+# Brute-force protection: at most this many failed sign-ins per IP per window.
+LOGIN_MAX_ATTEMPTS = 8
+LOGIN_WINDOW_SECONDS = 15 * 60
+
+DISASTER_TYPES = {
+    "FLOOD",
+    "EARTHQUAKE",
+    "FIRE",
+    "LANDSLIDE",
+    "INDUSTRIAL_ACCIDENT",
+    "OTHER",
+}
+SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+RESOURCE_CATEGORIES = {"Ambulance", "RescueTeam", "MedicalTeam", "Equipment", "Supply"}
+STATUSES = ("pending", "accepted", "rejected")
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS admin_credentials (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    salt         BLOB    NOT NULL,
+    iterations   INTEGER NOT NULL,
+    password_hash BLOB   NOT NULL,
+    updated_at   TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash  TEXT PRIMARY KEY,
+    csrf_token  TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS requests (
+    id                 TEXT    PRIMARY KEY,
+    type               TEXT    NOT NULL,
+    severity           TEXT    NOT NULL,
+    affected_people    INTEGER NOT NULL,
+    required_resources TEXT    NOT NULL DEFAULT '[]',
+    location_name      TEXT    NOT NULL,
+    latitude           REAL    NOT NULL,
+    longitude          REAL    NOT NULL,
+    status             TEXT    NOT NULL DEFAULT 'pending',
+    submitted_at       TEXT    NOT NULL,
+    decided_at         TEXT
+);
+
+CREATE TABLE IF NOT EXISTS login_attempts (
+    ip            TEXT NOT NULL,
+    attempted_at  REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
+CREATE INDEX IF NOT EXISTS idx_login_ip_time ON login_attempts(ip, attempted_at);
+"""
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def resolve_db_path(cli_value: str | None) -> Path:
+    """CLI wins over the environment, then the repo-local default."""
+    if cli_value:
+        return Path(cli_value).expanduser().resolve()
+    env_value = os.environ.get("DRRAS_DB_PATH")
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    return DEFAULT_DB_PATH
+
+
+class ApiError(Exception):
+    def __init__(self, message: str, status: int = HTTPStatus.BAD_REQUEST) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+class Store:
+    """SQLite persistence. One short-lived connection per operation, so this is
+    safe to use from ThreadingHTTPServer's worker threads."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            conn.executescript(SCHEMA)
+
+    @contextmanager
+    def _connect(self):
+        conn = sqlite3.connect(self.path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    # ---- credentials ----
+
+    def set_password(self, password: str) -> None:
+        salt = secrets.token_bytes(16)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO admin_credentials (id, salt, iterations, password_hash, updated_at)
+                VALUES (1, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    salt = excluded.salt,
+                    iterations = excluded.iterations,
+                    password_hash = excluded.password_hash,
+                    updated_at = excluded.updated_at
+                """,
+                (salt, PBKDF2_ITERATIONS, digest, iso(utc_now())),
+            )
+
+    def has_password(self) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("SELECT 1 AS ok FROM admin_credentials WHERE id = 1").fetchone()
+        return row is not None
+
+    def verify_password(self, password: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT salt, iterations, password_hash FROM admin_credentials WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return False
+        candidate = hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), bytes(row["salt"]), int(row["iterations"])
+        )
+        return hmac.compare_digest(candidate, bytes(row["password_hash"]))
+
+    # ---- sessions ----
+
+    def create_session(self) -> tuple[str, str]:
+        token = secrets.token_urlsafe(32)
+        csrf = secrets.token_urlsafe(32)
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO sessions (token_hash, csrf_token, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                (self._hash(token), csrf, iso(now), iso(now + SESSION_LIFETIME)),
+            )
+            conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (iso(now),))
+        return token, csrf
+
+    @staticmethod
+    def _hash(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def get_session(self, token: str) -> sqlite3.Row | None:
+        if not token:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT token_hash, csrf_token, expires_at FROM sessions WHERE token_hash = ?",
+                (self._hash(token),),
+            ).fetchone()
+        if row is None:
+            return None
+        if datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00")) <= utc_now():
+            self.delete_session(token)
+            return None
+        return row
+
+    def check_csrf(self, token: str, csrf: str) -> bool:
+        session = self.get_session(token)
+        if session is None or not csrf:
+            return False
+        return hmac.compare_digest(session["csrf_token"], csrf)
+
+    def delete_session(self, token: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM sessions WHERE token_hash = ?", (self._hash(token),))
+
+    # ---- login rate limiting ----
+
+    def too_many_login_attempts(self, ip: str) -> bool:
+        cutoff = time.time() - LOGIN_WINDOW_SECONDS
+        with self._connect() as conn:
+            conn.execute("DELETE FROM login_attempts WHERE attempted_at < ?", (cutoff,))
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM login_attempts WHERE ip = ? AND attempted_at >= ?",
+                (ip, cutoff),
+            ).fetchone()
+        return bool(row) and int(row["n"]) >= LOGIN_MAX_ATTEMPTS
+
+    def record_login_failure(self, ip: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)", (ip, time.time())
+            )
+
+    def clear_login_failures(self, ip: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM login_attempts WHERE ip = ?", (ip,))
+
+    # ---- requests ----
+
+    def create_request(self, data: dict) -> dict:
+        request_id = f"REQ-{secrets.token_hex(4).upper()}"
+        submitted = iso(utc_now())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO requests (
+                    id, type, severity, affected_people, required_resources,
+                    location_name, latitude, longitude, status, submitted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    request_id,
+                    data["type"],
+                    data["severity"],
+                    data["affectedPeople"],
+                    json.dumps(data["requiredResources"]),
+                    data["locationName"],
+                    data["latitude"],
+                    data["longitude"],
+                    submitted,
+                ),
+            )
+        return self.get_request(request_id)  # type: ignore[return-value]
+
+    def get_request(self, request_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone()
+        return self._to_dict(row) if row else None
+
+    def list_requests(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM requests ORDER BY submitted_at DESC, id DESC LIMIT 1000"
+            ).fetchall()
+        return [self._to_dict(row) for row in rows]
+
+    def set_request_status(self, request_id: str, status: str) -> dict:
+        with self._connect() as conn:
+            row = conn.execute("SELECT status FROM requests WHERE id = ?", (request_id,)).fetchone()
+            if row is None:
+                raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
+            if row["status"] != "pending":
+                raise ApiError(
+                    f"Request {request_id} was already {row['status']}.", HTTPStatus.CONFLICT
+                )
+            conn.execute(
+                "UPDATE requests SET status = ?, decided_at = ? WHERE id = ?",
+                (status, iso(utc_now()), request_id),
+            )
+        updated = self.get_request(request_id)
+        if updated is None:  # pragma: no cover - defensive
+            raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
+        return updated
+
+    @staticmethod
+    def _to_dict(row: sqlite3.Row) -> dict:
+        """Maps snake_case columns onto the camelCase shape docs/js expects."""
+        try:
+            resources = json.loads(row["required_resources"])
+        except (TypeError, json.JSONDecodeError):
+            resources = []
+        return {
+            "id": row["id"],
+            "type": row["type"],
+            "severity": row["severity"],
+            "affectedPeople": int(row["affected_people"]),
+            "requiredResources": resources,
+            "locationName": row["location_name"],
+            "latitude": float(row["latitude"]),
+            "longitude": float(row["longitude"]),
+            "status": row["status"],
+            "submittedAt": row["submitted_at"],
+            "decidedAt": row["decided_at"],
+        }
+
+
+def validate_request_payload(raw: object) -> dict:
+    if not isinstance(raw, dict):
+        raise ApiError("Expected a JSON object.")
+
+    def field(name: str):
+        return raw.get(name)
+
+    disaster_type = str(field("type") or "").strip().upper()
+    if disaster_type not in DISASTER_TYPES:
+        raise ApiError("Unknown disaster type.")
+
+    severity = str(field("severity") or "").strip().upper()
+    if severity not in SEVERITIES:
+        raise ApiError("Severity must be CRITICAL, HIGH, MEDIUM or LOW.")
+
+    affected = field("affectedPeople")
+    if isinstance(affected, bool) or not isinstance(affected, (int, float)):
+        raise ApiError("Affected people must be a number.")
+    affected_int = int(affected)
+    if affected_int < 0 or affected_int > 1_000_000_000:
+        raise ApiError("Affected people cannot be negative.")
+
+    location = str(field("locationName") or "").strip()
+    if not location:
+        raise ApiError("Location name is required.")
+    if len(location) > 200:
+        raise ApiError("Location name is too long (max 200 characters).")
+
+    latitude = field("latitude")
+    longitude = field("longitude")
+    for value, label, bound in ((latitude, "Latitude", 90.0), (longitude, "Longitude", 180.0)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ApiError(f"{label} must be a number.")
+        if not (-bound <= float(value) <= bound):
+            raise ApiError(f"{label} must be between {-bound} and {bound}.")
+
+    resources_raw = field("requiredResources")
+    if resources_raw is None:
+        resources_raw = []
+    if not isinstance(resources_raw, list) or len(resources_raw) > len(RESOURCE_CATEGORIES):
+        raise ApiError("Required resources must be a list.")
+    resources: list[str] = []
+    for item in resources_raw:
+        value = str(item).strip()
+        if value not in RESOURCE_CATEGORIES:
+            raise ApiError(f"Unknown resource category: {value}")
+        if value not in resources:
+            resources.append(value)
+
+    return {
+        "type": disaster_type,
+        "severity": severity,
+        "affectedPeople": affected_int,
+        "requiredResources": resources,
+        "locationName": html.escape(location, quote=False),
+        "latitude": float(latitude),
+        "longitude": float(longitude),
+    }
+
+
+class DrrasHandler(SimpleHTTPRequestHandler):
+    """Static files out of ``docs/`` plus the JSON API, on one origin."""
+
+    server_version = "DRRAS/1.0"
+    store: Store  # attached by the factory below
+    cookie_secure = False
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, directory=str(STATIC_ROOT), **kwargs)
+
+    # ---- helpers ----
+
+    def log_message(self, fmt: str, *args) -> None:  # keep stdout tidy
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def _send_json(self, payload: dict, status: int = HTTPStatus.OK, extra_headers=None) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in extra_headers or ():
+            self.send_header(name, value)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _read_json(self) -> object:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise ApiError("Invalid Content-Length.") from None
+        if length <= 0:
+            return {}
+        if length > MAX_BODY_BYTES:
+            raise ApiError("Request body is too large.", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ApiError("Request body must be valid JSON.") from None
+
+    def _session_token(self) -> str:
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return ""
+        cookie = SimpleCookie()
+        try:
+            cookie.load(raw)
+        except Exception:
+            return ""
+        morsel = cookie.get(SESSION_COOKIE_NAME)
+        return morsel.value if morsel else ""
+
+    def _require_admin(self) -> sqlite3.Row:
+        session = self.store.get_session(self._session_token())
+        if session is None:
+            raise ApiError("Your admin session has expired. Sign in again.", HTTPStatus.UNAUTHORIZED)
+        return session
+
+    def _require_csrf(self) -> None:
+        token = self._session_token()
+        supplied = self.headers.get("X-CSRF-Token", "")
+        if not self.store.check_csrf(token, supplied):
+            raise ApiError("Missing or invalid CSRF token.", HTTPStatus.FORBIDDEN)
+
+    def _client_ip(self) -> str:
+        forwarded = self.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return self.client_address[0] if self.client_address else "unknown"
+
+    def _cookie(self, value: str, max_age: int) -> str:
+        parts = [
+            f"{SESSION_COOKIE_NAME}={value}",
+            "Path=/",
+            "HttpOnly",
+            "SameSite=Strict",
+            f"Max-Age={max_age}",
+        ]
+        if self.cookie_secure:
+            parts.append("Secure")
+        return "; ".join(parts)
+
+    # ---- routing ----
+
+    def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+        path = self.path.split("?", 1)[0]
+        if path.startswith("/api/"):
+            self._route_get(path)
+            return
+        if path in ("/admin", "/admin/"):
+            self.path = "/admin.html"
+        elif path == "/":
+            self.path = "/index.html"
+        self._serve_static()
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self.do_GET()
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._route_post(self.path.split("?", 1)[0])
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._route_patch(self.path.split("?", 1)[0])
+
+    def _serve_static(self) -> None:
+        if not STATIC_ROOT.is_dir():
+            self._send_json({"error": "Static site folder docs/ is missing."}, HTTPStatus.NOT_FOUND)
+            return
+        super().do_GET()
+
+    # ---- API: read ----
+
+    def _route_get(self, path: str) -> None:
+        try:
+            if path == "/api/health":
+                self._send_json({"status": "ok", "passwordConfigured": self.store.has_password()})
+                return
+            if path == "/api/admin/session":
+                session = self._require_admin()
+                self._send_json({"authenticated": True, "csrfToken": session["csrf_token"]})
+                return
+            if path == "/api/admin/requests":
+                self._require_admin()
+                self._send_json({"requests": self.store.list_requests()})
+                return
+            if path.startswith("/api/admin/requests/"):
+                self._require_admin()
+                request_id = unquote(path.rsplit("/", 1)[-1])
+                record = self.store.get_request(request_id)
+                if record is None:
+                    raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
+                self._send_json({"request": record})
+                return
+            raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
+        except ApiError as err:
+            self._send_json({"error": err.message}, err.status)
+
+    # ---- API: create / auth ----
+
+    def _route_post(self, path: str) -> None:
+        try:
+            if path == "/api/requests":
+                payload = validate_request_payload(self._read_json())
+                self._send_json({"request": self.store.create_request(payload)}, HTTPStatus.CREATED)
+                return
+            if path == "/api/admin/login":
+                self._handle_login()
+                return
+            if path == "/api/admin/logout":
+                self._require_admin()
+                self._require_csrf()
+                self.store.delete_session(self._session_token())
+                self._send_json(
+                    {"ok": True},
+                    extra_headers=[("Set-Cookie", self._cookie("", 0))],
+                )
+                return
+            raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
+        except ApiError as err:
+            self._send_json({"error": err.message}, err.status)
+
+    def _handle_login(self) -> None:
+        ip = self._client_ip()
+        if self.store.too_many_login_attempts(ip):
+            raise ApiError(
+                "Too many failed sign-in attempts. Try again in a few minutes.",
+                HTTPStatus.TOO_MANY_REQUESTS,
+            )
+        if not self.store.has_password():
+            raise ApiError(
+                "No admin password is configured. Run: python3 backend/admin_server.py --set-password",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        body = self._read_json()
+        password = body.get("password") if isinstance(body, dict) else None
+        if not isinstance(password, str) or not self.store.verify_password(password):
+            self.store.record_login_failure(ip)
+            raise ApiError("Incorrect password.", HTTPStatus.UNAUTHORIZED)
+        self.store.clear_login_failures(ip)
+        token, csrf = self.store.create_session()
+        max_age = int(SESSION_LIFETIME.total_seconds())
+        self._send_json(
+            {"ok": True, "csrfToken": csrf},
+            extra_headers=[("Set-Cookie", self._cookie(token, max_age))],
+        )
+
+    # ---- API: decisions ----
+
+    def _route_patch(self, path: str) -> None:
+        try:
+            self._require_admin()
+            self._require_csrf()
+            if not path.startswith("/api/admin/requests/"):
+                raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
+            request_id = unquote(path.rsplit("/", 1)[-1])
+            body = self._read_json()
+            if not isinstance(body, dict):
+                raise ApiError("Expected a JSON object.")
+            status = str(body.get("status") or "").strip().lower()
+            if status not in ("accepted", "rejected"):
+                raise ApiError("Status must be 'accepted' or 'rejected'.")
+            self._send_json({"request": self.store.set_request_status(request_id, status)})
+        except ApiError as err:
+            self._send_json({"error": err.message}, err.status)
+
+
+def make_server(host: str, port: int, store: Store, cookie_secure: bool) -> ThreadingHTTPServer:
+    # Bind the store onto a per-server subclass instead of mutating DrrasHandler
+    # itself: the class is shared, so assigning to it would leak this server's
+    # database into every other server in the process.
+    handler = type(
+        "BoundDrrasHandler",
+        (DrrasHandler,),
+        {"store": store, "cookie_secure": cookie_secure},
+    )
+    httpd = ThreadingHTTPServer((host, port), handler)
+    httpd.daemon_threads = True
+    return httpd
+
+
+def set_password_interactively(store: Store) -> int:
+    print(f"Setting the DRRAS admin password.\nDatabase: {store.path}")
+    if store.has_password():
+        print("A password is already configured; the new one will replace it.")
+    while True:
+        password = getpass.getpass("New password (min %d chars): " % MIN_PASSWORD_LENGTH)
+        if len(password) < MIN_PASSWORD_LENGTH:
+            print(f"Too short - use at least {MIN_PASSWORD_LENGTH} characters.\n")
+            continue
+        if password != getpass.getpass("Repeat it: "):
+            print("Those did not match, try again.\n")
+            continue
+        store.set_password(password)
+        break
+    print("Password stored (PBKDF2-HMAC-SHA256, salted).")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="DRRAS web UI + request review API")
+    parser.add_argument("--set-password", action="store_true", help="create or reset the admin password, then exit")
+    parser.add_argument("--db", default=None, help="SQLite file (default: $DRRAS_DB_PATH or backend/data/drras.sqlite3)")
+    parser.add_argument("--host", default=os.environ.get("DRRAS_HOST", "0.0.0.0"), help="bind address (default 0.0.0.0)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("DRRAS_PORT", "8000")),
+        help="port (default 8000; $PORT overrides for PaaS hosts)",
+    )
+    args = parser.parse_args(argv)
+
+    # Platform-as-a-service hosts (Render, Railway, Fly) inject PORT and expect
+    # the app to bind directly to it rather than to a fixed 8000.
+    port_env = os.environ.get("PORT")
+    if port_env and "--port" not in (argv or sys.argv[1:]):
+        try:
+            args.port = int(port_env)
+        except ValueError:
+            pass
+
+    store = Store(resolve_db_path(args.db))
+
+    if args.set_password:
+        return set_password_interactively(store)
+
+    cookie_secure = os.environ.get("DRRAS_COOKIE_SECURE", "") == "1"
+    try:
+        httpd = make_server(args.host, args.port, store, cookie_secure)
+    except OSError as err:
+        print(f"Could not bind {args.host}:{args.port} - {err}", file=sys.stderr)
+        print("Something else is probably using that port; try --port 8010.", file=sys.stderr)
+        return 1
+
+    print(f"DRRAS site : http://localhost:{args.port}/")
+    print(f"Admin UI   : http://localhost:{args.port}/admin")
+    print(f"Database   : {store.path}")
+    if not store.has_password():
+        print("No admin password yet -> python3 backend/admin_server.py --set-password")
+    print("Ctrl-C to stop.")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping.")
+    finally:
+        httpd.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
