@@ -40,11 +40,14 @@ class ServerTestCase(unittest.TestCase):
         cookie_secure: bool = False,
         cookie_samesite=None,
         cookie_partitioned: bool = False,
+        allow_bearer_auth: bool = False,
     ):
         store = admin_server.Store(db_path)
         kwargs = {} if cookie_samesite is None else {"cookie_samesite": cookie_samesite}
         if cookie_partitioned:
             kwargs["cookie_partitioned"] = True
+        if allow_bearer_auth:
+            kwargs["allow_bearer_auth"] = True
         httpd = admin_server.make_server("127.0.0.1", 0, store, cookie_secure, **kwargs)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
@@ -541,6 +544,153 @@ class CookiePolicyTests(ServerTestCase):
         with self.assertRaises(SystemExit) as ctx:
             admin_server.main(["--cookie-partitioned"])
         self.assertEqual(ctx.exception.code, 2)
+
+
+class BearerAuthTests(ServerTestCase):
+    """Header-based admin auth for the one case cookies cannot serve: the app
+    embedded in a frame on a browser that refuses third-party cookies."""
+
+    def server(self, name: str, allow: bool):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        httpd, store, base = self._start(Path(tmp.name) / name, allow_bearer_auth=allow)
+        self.addCleanup(httpd.shutdown)
+        self.addCleanup(httpd.server_close)
+        store.set_password(PASSWORD)
+        return store, base
+
+    def raw(self, base: str, method: str, path: str, body=None, headers=None):
+        """A request with no cookie jar - the blocked-cookie scenario."""
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(base + path, data=data, method=method)
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        for key, value in (headers or {}).items():
+            req.add_header(key, value)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read() or b"{}")
+        except urllib.error.HTTPError as err:
+            return err.code, json.loads(err.read() or b"{}")
+
+    def seed(self, store):
+        return store.create_request(
+            admin_server.validate_request_payload(
+                {
+                    "type": "FLOOD",
+                    "severity": "CRITICAL",
+                    "affectedPeople": 12,
+                    "requiredResources": ["Supply"],
+                    "locationName": "Delta",
+                    "latitude": 1.5,
+                    "longitude": 2.5,
+                }
+            )
+        )
+
+    def test_token_issued_when_enabled_and_works_without_any_cookie(self):
+        store, base = self.server("on.sqlite3", True)
+        record = self.seed(store)
+        status, payload = self.raw(base, "POST", "/api/admin/login", {"password": PASSWORD})
+        self.assertEqual(status, 200)
+        token = payload.get("sessionToken")
+        self.assertTrue(token, "bearer mode must hand the client a token")
+        self.assertEqual(payload.get("authMode"), "bearer")
+
+        status, listed = self.raw(base, "GET", "/api/admin/requests", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(status, 200, "cookie-free admin read is the whole point")
+        self.assertIn(record["id"], [r["id"] for r in listed["requests"]])
+
+        # A mutation needs no CSRF token: a cross-site page cannot forge this header.
+        status, decided = self.raw(
+            base,
+            "PATCH",
+            "/api/admin/requests/" + record["id"],
+            {"status": "accepted"},
+            {"Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual(status, 200, decided)
+        self.assertEqual(decided["request"]["status"], "accepted")
+
+    def test_session_endpoint_echoes_the_token_for_page_reloads(self):
+        _, base = self.server("echo.sqlite3", True)
+        token = self.raw(base, "POST", "/api/admin/login", {"password": PASSWORD})[1]["sessionToken"]
+        status, payload = self.raw(base, "GET", "/api/admin/session", headers={"Authorization": f"Bearer {token}"})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["sessionToken"], token, "reload must be able to restore the session")
+
+    def test_scheme_is_case_insensitive_and_junk_is_rejected(self):
+        _, base = self.server("case.sqlite3", True)
+        token = self.raw(base, "POST", "/api/admin/login", {"password": PASSWORD})[1]["sessionToken"]
+        for scheme in ("Bearer", "bearer", "BeArEr"):
+            status, _ = self.raw(base, "GET", "/api/admin/requests", headers={"Authorization": f"{scheme} {token}"})
+            self.assertEqual(status, 200, scheme)
+        for guess in ("Bearer ", "Bearer   ", "Bearer not-a-real-token", "Basic dXNlcjpwdw==",
+                      "Bearer " + "x" * 43):
+            status, _ = self.raw(base, "GET", "/api/admin/requests", headers={"Authorization": guess})
+            self.assertEqual(status, 401, guess)
+
+    def test_token_is_opt_in_and_inert_when_disabled(self):
+        store, base = self.server("off.sqlite3", False)
+        status, payload = self.raw(base, "POST", "/api/admin/login", {"password": PASSWORD})
+        self.assertEqual(status, 200)
+        self.assertNotIn("sessionToken", payload, "default posture stays cookie-only")
+        real_token = store.create_session()[0]
+        status, _ = self.raw(base, "GET", "/api/admin/requests", headers={"Authorization": f"Bearer {real_token}"})
+        self.assertEqual(status, 401, "a genuine token must not work while the mode is off")
+
+    def test_logout_revokes_the_token(self):
+        _, base = self.server("out.sqlite3", True)
+        token = self.raw(base, "POST", "/api/admin/login", {"password": PASSWORD})[1]["sessionToken"]
+        self.assertEqual(self.raw(base, "POST", "/api/admin/logout", {}, {"Authorization": f"Bearer {token}"})[0], 200)
+        self.assertEqual(self.raw(base, "GET", "/api/admin/requests", headers={"Authorization": f"Bearer {token}"})[0], 401)
+
+    def test_cookie_auth_still_requires_csrf_while_bearer_does_not(self):
+        store, base = self.server("mixed.sqlite3", True)
+        record = self.seed(store)
+        # A session created directly stands in for "the browser holds this cookie".
+        known_token, known_csrf = store.create_session()
+        cookie = {"Cookie": f"{admin_server.SESSION_COOKIE_NAME}={known_token}"}
+        path = "/api/admin/requests/" + record["id"]
+
+        status, _ = self.raw(base, "PATCH", path, {"status": "accepted"}, cookie)
+        self.assertEqual(status, 403, "cookie-authed mutation must demand CSRF")
+
+        status, _ = self.raw(base, "PATCH", path, {"status": "accepted"}, {**cookie, "X-CSRF-Token": known_csrf})
+        self.assertEqual(status, 200, "with CSRF the cookie path still works")
+
+    def test_bearer_mode_does_not_weaken_the_password_check(self):
+        store, base = self.server("forgery.sqlite3", True)
+        record = self.seed(store)
+        for guess in ("", "not-a-real-token", "x" * 43):
+            status, _ = self.raw(
+                base, "PATCH", "/api/admin/requests/" + record["id"], {"status": "accepted"},
+                {"Authorization": f"Bearer {guess}"},
+            )
+            self.assertEqual(status, 401, guess)
+        self.assertEqual(store.get_request(record["id"])["status"], "pending")
+
+
+class StaticCachingTests(ServerTestCase):
+    """A cached admin.html pointing at a stale admin.js makes a shipped fix look
+    like it did nothing - the entry documents must always revalidate."""
+
+    def header(self, path: str, name: str):
+        with urllib.request.urlopen(self.base + path) as resp:
+            return resp.headers.get(name)
+
+    def test_html_is_no_cache(self):
+        for path in ("/", "/index.html", "/admin.html", "/admin"):
+            self.assertEqual(self.header(path, "Cache-Control"), "no-cache", path)
+
+    def test_assets_keep_default_revalidation(self):
+        self.assertIsNone(self.header("/js/admin.js", "Cache-Control"))
+        self.assertIsNone(self.header("/css/admin.css", "Cache-Control"))
+
+    def test_api_is_still_no_store(self):
+        _, payload, headers = self.get("/api/health")
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        self.assertTrue(payload["status"])
 
 
 class ValidationUnitTests(unittest.TestCase):
