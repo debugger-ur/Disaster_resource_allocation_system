@@ -5,20 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#102a43">
   <title>Admin · Disaster Relief Resource Allocation System</title>
-  <link rel="stylesheet" href="/css/admin.css">
-  <script type="module" src="/js/admin.js"></script>
+  <link rel="stylesheet" href="css/admin.css?v=2">
+  <script type="module" src="js/admin.js?v=2"></script>
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="Back to the DRRAS website">
+    <a class="brand" href="index.html" aria-label="Back to the DRRAS website">
       <span class="brand-mark" aria-hidden="true">DR</span>
       <span>Disaster Relief <span class="brand-muted">/ Admin</span></span>
     </a>
-    <a class="back-link" href="/">Back to public site <span aria-hidden="true">↗</span></a>
+    <a class="back-link" href="index.html">Back to public site <span aria-hidden="true">↗</span></a>
   </header>
 
   <main class="page-shell">
     <section id="loginSection" class="login-layout" aria-labelledby="loginHeading">
+      <p id="serviceBanner" class="mode-banner" hidden></p>
       <div class="intro-copy">
         <p class="eyebrow">CONTROL ROOM</p>
         <h1 id="loginHeading">Admin sign in</h1>
@@ -37,7 +38,7 @@
                minlength="12" maxlength="1024" required>
         <button id="loginButton" class="button button-primary button-wide" type="submit">Sign in</button>
         <p id="loginMessage" class="message" role="alert" aria-live="polite"></p>
-        <p class="login-help">No default password is configured. The site operator creates it on the server.</p>
+        <p class="login-help">Server-backed: the operator sets this with --set-password. Static hosting (Pages): the page uses the demo passphrase in requestService.js, which is a formality, not protection.</p>
       </form>
     </section>
 

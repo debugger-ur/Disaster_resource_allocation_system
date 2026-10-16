@@ -9,30 +9,39 @@ const requestRows = document.getElementById("requestRows");
 const emptyState = document.getElementById("emptyState");
 const statusFilter = document.getElementById("statusFilter");
 
+import {
+  bannerText,
+  decideRequest,
+  listRequests,
+  login,
+  logout,
+  sessionState,
+} from "./requestService.js";
+
 let csrfToken = null;
 let requests = [];
+let demoMode = false;
 
-class ApiError extends Error {
-  constructor(message, status) {
-    super(message);
-    this.status = status;
+// A 401 right after signing in used to mean "the browser dropped the cookie",
+// which on a static host has no cookie-level answer. requestService.js falls
+// back to browser storage there, so this is now mostly a stale-token signal.
+let dashboardOpenedAt = 0;
+
+function sessionLostMessage() {
+  if (dashboardOpenedAt && Date.now() - dashboardOpenedAt < 20000) {
+    return "Signed in, but the server rejected the session it just issued. The server was probably restarted, or this page is talking to a different origin - sign in again.";
   }
+  return "Your admin session has expired. Sign in again.";
 }
 
-async function api(url, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    credentials: "same-origin",
-    cache: "no-store",
-    headers: {
-      ...(options.headers || {}),
-    },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new ApiError(body.error || "The request could not be completed.", response.status);
-  }
-  return body;
+function setDemoNotice(demo) {
+  demoMode = demo;
+  const banner = document.getElementById("serviceBanner");
+  if (!banner) return;
+  banner.textContent = demo
+    ? "DEMO MODE - no server behind this page, so sign-in here is a formality and requests are visible only in this browser."
+    : "";
+  banner.hidden = !demo;
 }
 
 function showLogin(message = "") {
@@ -160,7 +169,8 @@ function renderRequests() {
 
 async function loadRequests() {
   dashboardMessage.textContent = "";
-  const result = await api("/api/admin/requests");
+  const result = await listRequests();
+  setDemoNotice(Boolean(result.demo));
   requests = Array.isArray(result.requests) ? result.requests : [];
   setSummaryCounts(requests);
   renderRequests();
@@ -172,23 +182,19 @@ loginForm.addEventListener("submit", async (event) => {
   loginButton.disabled = true;
   loginButton.textContent = "Signing in…";
   try {
-    const result = await api("/api/admin/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: adminPassword.value }),
-    });
+    const result = await login(adminPassword.value);
     adminPassword.value = "";
+    dashboardOpenedAt = Date.now();
+    setDemoNotice(Boolean(result.demo));
     showDashboard(result.csrfToken);
     try {
       await loadRequests();
     } catch (error) {
-      if (error.status === 401) showLogin("Your admin session has expired. Sign in again.");
+      if (error.status === 401) showLogin(sessionLostMessage());
       else dashboardMessage.textContent = error.message;
     }
   } catch (error) {
-    loginMessage.textContent = error instanceof TypeError
-      ? "The admin service could not be reached. Please try again shortly."
-      : error.message;
+    loginMessage.textContent = error.message || "The admin service could not be reached. Please try again shortly.";
   } finally {
     loginButton.disabled = false;
     loginButton.textContent = "Sign in";
@@ -204,7 +210,7 @@ document.getElementById("refreshButton").addEventListener("click", async (event)
   try {
     await loadRequests();
   } catch (error) {
-    if (error.status === 401) showLogin("Your admin session has expired. Sign in again.");
+    if (error.status === 401) showLogin(sessionLostMessage());
     else dashboardMessage.textContent = error.message;
   } finally {
     button.disabled = false;
@@ -224,17 +230,10 @@ requestRows.addEventListener("click", async (event) => {
   rowButtons.forEach((item) => { item.disabled = true; });
   dashboardMessage.textContent = "";
   try {
-    await api(`/api/admin/requests/${encodeURIComponent(request.id)}`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        "X-CSRF-Token": csrfToken,
-      },
-      body: JSON.stringify({ status: action }),
-    });
+    await decideRequest(request.id, action, csrfToken);
     await loadRequests();
   } catch (error) {
-    if (error.status === 401) showLogin("Your admin session has expired. Sign in again.");
+    if (error.status === 401) showLogin(sessionLostMessage());
     else {
       await loadRequests().catch(() => {});
       dashboardMessage.textContent = error.message;
@@ -246,13 +245,10 @@ document.getElementById("logoutButton").addEventListener("click", async (event) 
   const button = event.currentTarget;
   button.disabled = true;
   try {
-    await api("/api/admin/logout", {
-      method: "POST",
-      headers: { "X-CSRF-Token": csrfToken },
-    });
+    await logout(csrfToken);
     showLogin("You have been signed out.");
   } catch (error) {
-    if (error.status === 401) showLogin("Your admin session has expired. Sign in again.");
+    if (error.status === 401) showLogin(sessionLostMessage());
     else dashboardMessage.textContent = error.message;
   } finally {
     button.disabled = false;
@@ -260,13 +256,21 @@ document.getElementById("logoutButton").addEventListener("click", async (event) 
 });
 
 async function initialize() {
+  bannerText().then((text) => {
+    const banner = document.getElementById("serviceBanner");
+    if (banner && text) {
+      banner.textContent = text;
+      banner.hidden = false;
+    }
+  });
   try {
-    const session = await api("/api/admin/session");
+    const session = await sessionState();
+    setDemoNotice(Boolean(session.demo));
     showDashboard(session.csrfToken);
     await loadRequests();
   } catch (error) {
     if (error.status === 401) showLogin();
-    else showLogin("The admin service could not be reached. Please try again shortly.");
+    else showLogin(error.message || "The admin service could not be reached. Please try again shortly.");
   }
 }
 
