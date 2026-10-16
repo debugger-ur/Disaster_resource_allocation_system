@@ -182,9 +182,18 @@ WantedBy=multi-user.target
 
 ### 2. Static-only host (GitHub Pages) — dashboard works, submissions do not
 
-GitHub Pages, Netlify, and Vercel (static mode) cannot run Python, so on those hosts the site renders and every client-side feature works — dashboard, distance ranking, allocation, Dijkstra routes, CSV export — but **submitting a relief request and the admin dashboard report `Could not reach the request service`**, because there is no `/api`. The checked-in `docs/.nojekyll` plus Pages serving the `docs/` folder is exactly this configuration.
+GitHub Pages, Netlify, and Vercel (static mode) cannot run Python, so on those hosts the site renders and every client-side feature works — dashboard, distance ranking, allocation, Dijkstra routes, CSV export — but **submitting a relief request and the admin dashboard report `Could not reach the request service`**, because there is no `/api`. Pointing Pages at the wrong folder adds a second, more confusing failure: with the source path set to `/` there is no `index.html` at the repository root, and the URL answers **"There isn't a GitHub Pages site here."** even though the build reports `status: built`.
 
-If you choose it: **Settings → Pages → Source: Deploy from a branch → `main` / `/docs`**, then open `https://<user>.github.io/<repo>/`. Both pages now use relative asset paths, so they render correctly under the project subpath. Do not expect the form to work there; point the form at a separately hosted instance of option 1 instead, or keep the demo local.
+Check which one you have — a successful build with a 404 means the path, not the code:
+
+```bash
+gh api repos/<owner>/<repo>/pages --jq '.source'   # want {"branch":"main","path":"/docs"}
+gh api repos/<owner>/<repo>/pages/builds?per_page=1 --jq '.[0] | {status, error: .error.message}'
+```
+
+Set it under **Settings → Pages → Build and deployment → Source: Deploy from a branch → `main` / `/docs`**, then open `https://<owner>.github.io/<repo>/`. If you cannot change that setting, the root `index.html` added here redirects into `docs/`, so `/` also serves the app; the repository-root `.nojekyll` exists so Jekyll leaves the folder alone in that configuration.
+
+Both pages use relative asset paths, so they render correctly under the project subpath (`/<repo>/docs/...`) rather than requesting `/css/...` from the domain root and coming back unstyled. Do not expect the request form or admin to work here — for that, use option 1, or point the form at a separately hosted instance of it.
 
 ### 3. Console application
 
