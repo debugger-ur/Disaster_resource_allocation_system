@@ -823,6 +823,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.set_password:
         return set_password_interactively(store)
+# Auto-initialize password from environment variable if not already set
+    env_password = os.environ.get("DRRAS_ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
+    if env_password:
+        if len(env_password) < MIN_PASSWORD_LENGTH:
+            print(
+                f"Warning: ADMIN_PASSWORD is too short (minimum {MIN_PASSWORD_LENGTH} characters); ignoring.",
+                file=sys.stderr,
+            )
+        elif not store.has_password():
+            store.set_password(env_password)
+            print("Admin password automatically initialized from environment variable.")
 
     cookie_secure = os.environ.get("DRRAS_COOKIE_SECURE", "") == "1"
     try:
