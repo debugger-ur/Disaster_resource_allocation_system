@@ -412,6 +412,12 @@ class DrrasHandler(SimpleHTTPRequestHandler):
     cookie_secure = False
     cookie_samesite = COOKIE_SAMESITE_DEFAULT
     cookie_partitioned = False
+    # Off by default: a token the page can read is a wider XSS surface than an
+    # HttpOnly cookie, so normal deployments keep the cookie. Opt in only when the
+    # app is embedded and the browser will not carry cookies across sites.
+    allow_bearer_auth = False
+    # Fail closed: if a request never authenticates, CSRF is still enforced.
+    auth_source = "cookie"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, directory=str(STATIC_ROOT), **kwargs)
@@ -449,7 +455,7 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise ApiError("Request body must be valid JSON.") from None
 
-    def _session_token(self) -> str:
+    def _cookie_token(self) -> str:
         raw = self.headers.get("Cookie")
         if not raw:
             return ""
@@ -461,13 +467,38 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         morsel = cookie.get(SESSION_COOKIE_NAME)
         return morsel.value if morsel else ""
 
+    def _credential(self) -> tuple[str, str]:
+        """Resolves the caller to (token, source).
+
+        An explicit Authorization header wins over the cookie. That is the only
+        credential that survives an embedded frame on a browser which refuses
+        third-party cookies, where login succeeds but every following call
+        arrives without the session cookie and reads as "expired".
+        """
+        auth = self.headers.get("Authorization", "")
+        if self.allow_bearer_auth and auth[:7].lower() == "bearer ":
+            candidate = auth[7:].strip()
+            if candidate:
+                return candidate, "bearer"
+        return self._cookie_token(), "cookie"
+
+    def _session_token(self) -> str:
+        """Just the token, whichever transport carried it."""
+        return self._credential()[0]
+
     def _require_admin(self) -> sqlite3.Row:
-        session = self.store.get_session(self._session_token())
+        token, source = self._credential()
+        session = self.store.get_session(token)
         if session is None:
             raise ApiError("Your admin session has expired. Sign in again.", HTTPStatus.UNAUTHORIZED)
+        self.auth_source = source
         return session
 
     def _require_csrf(self) -> None:
+        # A cross-site form cannot set custom headers, and the bearer token is not
+        # attached automatically by the browser, so CSRF is already guaranteed.
+        if self.auth_source == "bearer":
+            return
         token = self._session_token()
         supplied = self.headers.get("X-CSRF-Token", "")
         if not self.store.check_csrf(token, supplied):
@@ -509,6 +540,7 @@ class DrrasHandler(SimpleHTTPRequestHandler):
             self.path = "/admin.html"
         elif path == "/":
             self.path = "/index.html"
+        self._revalidate_html = self.path.split("?", 1)[0].endswith(".html")
         self._serve_static()
 
     def do_HEAD(self) -> None:  # noqa: N802
@@ -519,6 +551,14 @@ class DrrasHandler(SimpleHTTPRequestHandler):
 
     def do_PATCH(self) -> None:  # noqa: N802
         self._route_patch(self.path.split("?", 1)[0])
+
+    def end_headers(self) -> None:
+        # Entry documents must always revalidate: a cached admin.html keeps
+        # pointing at an old admin.js, and the page then behaves like the fix
+        # never landed.
+        if getattr(self, "_revalidate_html", False):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
 
     def _serve_static(self) -> None:
         if not STATIC_ROOT.is_dir():
@@ -535,7 +575,10 @@ class DrrasHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/admin/session":
                 session = self._require_admin()
-                self._send_json({"authenticated": True, "csrfToken": session["csrf_token"]})
+                payload = {"authenticated": True, "csrfToken": session["csrf_token"]}
+                if self.auth_source == "bearer":
+                    payload["sessionToken"] = self._session_token()
+                self._send_json(payload)
                 return
             if path == "/api/admin/requests":
                 self._require_admin()
@@ -597,8 +640,14 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         self.store.clear_login_failures(ip)
         token, csrf = self.store.create_session()
         max_age = int(SESSION_LIFETIME.total_seconds())
+        payload: dict = {"ok": True, "csrfToken": csrf}
+        if self.allow_bearer_auth:
+            # Clients that cannot use cookies (embedded frames under third-party
+            # cookie blocking) authenticate with this instead.
+            payload["sessionToken"] = token
+            payload["authMode"] = "bearer"
         self._send_json(
-            {"ok": True, "csrfToken": csrf},
+            payload,
             extra_headers=[("Set-Cookie", self._cookie(token, max_age))],
         )
 
@@ -639,6 +688,7 @@ def make_server(
     cookie_secure: bool,
     cookie_samesite: str = COOKIE_SAMESITE_DEFAULT,
     cookie_partitioned: bool = False,
+    allow_bearer_auth: bool = False,
 ) -> ThreadingHTTPServer:
     # Bind the store onto a per-server subclass instead of mutating DrrasHandler
     # itself: the class is shared, so assigning to it would leak this server's
@@ -651,6 +701,7 @@ def make_server(
             "cookie_secure": cookie_secure,
             "cookie_samesite": normalize_samesite(cookie_samesite),
             "cookie_partitioned": bool(cookie_partitioned),
+            "allow_bearer_auth": bool(allow_bearer_auth),
         },
     )
     httpd = ThreadingHTTPServer((host, port), handler)
@@ -699,6 +750,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--allow-bearer-auth",
+        action="store_true",
+        default=os.environ.get("DRRAS_ALLOW_BEARER_AUTH", "") == "1",
+        help=(
+            "also return a bearer token on sign-in so clients that cannot carry "
+            "cookies (the app embedded in a frame under third-party cookie blocking) "
+            "still authenticate. Weaker against XSS than an HttpOnly cookie: enable "
+            "only when you need it. (env: DRRAS_ALLOW_BEARER_AUTH=1)"
+        ),
+    )
+    parser.add_argument(
         "--cookie-partitioned",
         action="store_true",
         default=os.environ.get("DRRAS_COOKIE_PARTITIONED", "") == "1",
@@ -736,6 +798,7 @@ def main(argv: list[str] | None = None) -> int:
             cookie_secure,
             args.cookie_samesite,
             args.cookie_partitioned,
+            args.allow_bearer_auth,
         )
     except OSError as err:
         print(f"Could not bind {args.host}:{args.port} - {err}", file=sys.stderr)
@@ -751,6 +814,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cookie_partitioned and args.cookie_samesite == "None":
         cookie_flags.append("Partitioned")
     print("Cookie     : " + "; ".join(cookie_flags))
+    print(
+        "Admin auth : cookie" + (" + bearer token" if args.allow_bearer_auth else "")
+        + ("  (DRRAS_ALLOW_BEARER_AUTH=1)" if args.allow_bearer_auth else "")
+    )
     if args.cookie_samesite == "None":
         print(
             "           SameSite=None needs https (http://localhost excepted). To open"

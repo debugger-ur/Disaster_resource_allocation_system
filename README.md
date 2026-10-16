@@ -149,7 +149,7 @@ python3 backend/admin_server.py --set-password   # prompts twice, min 12 chars
 python3 backend/admin_server.py                  # http://0.0.0.0:8000  (+ /admin)
 ```
 
-Useful flags/env vars: `--port`, `--host`, `--db`, `--cookie-samesite`, `--cookie-partitioned`, or `DRRAS_DB_PATH` / `DRRAS_PORT` / `PORT` / `DRRAS_COOKIE_SECURE=1` / `DRRAS_COOKIE_SAMESITE` / `DRRAS_COOKIE_PARTITIONED=1`. The `--set-password` step must point at the same database file you then serve, or the new server starts with no credentials and the login screen reports `No admin password is configured`.
+Useful flags/env vars: `--port`, `--host`, `--db`, `--cookie-samesite`, `--cookie-partitioned`, `--allow-bearer-auth`, or `DRRAS_DB_PATH` / `DRRAS_PORT` / `PORT` / `DRRAS_COOKIE_SECURE=1` / `DRRAS_COOKIE_SAMESITE` / `DRRAS_COOKIE_PARTITIONED=1` / `DRRAS_ALLOW_BEARER_AUTH=1`. The `--set-password` step must point at the same database file you then serve, or the new server starts with no credentials and the login screen reports `No admin password is configured`.
 
 **Docker (simplest reproducible deploy).** The image carries no third-party dependencies:
 
@@ -213,7 +213,25 @@ Two fixes, in order of preference:
 
 1. **Open the site in its own browser tab** (top-level, not embedded). No server
    change needed, and `Strict` stays in force.
-2. **If it must be embedded**, relax the policy and serve over HTTPS:
+2. **If it must be embedded**, cookies may be unavailable no matter what you set —
+   recent browsers block third-party cookies in cross-site frames outright, and
+   Safari blocks them regardless of `SameSite`. In that case stop relying on
+   cookies and let the page authenticate with a header instead:
+
+```bash
+python3 backend/admin_server.py --allow-bearer-auth
+```
+
+Sign-in then also returns a `sessionToken`, which the admin page keeps in
+`sessionStorage` and sends as `Authorization: Bearer …`. It needs no cookie, so it
+works inside any frame, and mutations over this path skip the CSRF token by design
+(a cross-site page cannot forge that header). The cookie path is unaffected and
+remains the default: without the flag the server never issues a token and
+`Authorization` grants nothing. The trade-off is real — a token readable by page
+script widens the XSS blast radius versus an `HttpOnly` cookie — so this is opt-in,
+per-tab, and cleared on logout and on any `401`.
+
+For a cookie-only deployment, relaxing the policy is enough:
 
 ```bash
 python3 backend/admin_server.py --cookie-samesite None            # needs https
@@ -225,8 +243,14 @@ http** (only `http://localhost` is exempt) — so `None` over `http://192.168.x.
 reproduces the same 401 loop. `--cookie-partitioned` is for browsers that block
 third-party cookies outright inside iframes; it is refused unless paired with
 `None`. Use the same flags as env vars (`DRRAS_COOKIE_SAMESITE`,
-`DRRAS_COOKIE_PARTITIONED=1`) for containers. Sessions otherwise last 8 hours, so
-a genuine expiry after that is expected behaviour.
+`DRRAS_COOKIE_PARTITIONED=1`, `DRRAS_ALLOW_BEARER_AUTH=1`) for containers. Sessions
+otherwise last 8 hours, so a genuine expiry after that is expected behaviour.
+
+If a fix you deployed does not seem to take effect, suspect the cache, not the
+code: the browser may serve `admin.js` straight from disk without asking. The
+server answers HTML with `Cache-Control: no-cache` so entry points always
+revalidate, and `docs/admin.html` references its assets as `?v=N` — bump `N` when
+you change `docs/js/admin.js` or `docs/css/admin.css`, and hard-reload (Ctrl+Shift+R).
 
 ### Pre-public checklist
 

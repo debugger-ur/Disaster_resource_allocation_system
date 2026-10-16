@@ -11,6 +11,30 @@ const statusFilter = document.getElementById("statusFilter");
 
 let csrfToken = null;
 let requests = [];
+// When the app is embedded in a frame on another site, a browser may refuse to
+// carry the session cookie at all - sign-in then looks like an instant expiry.
+// A bearer token the page sends explicitly is unaffected. Server opt-in:
+// --allow-bearer-auth. sessionStorage (not localStorage) so it dies with the tab.
+const TOKEN_KEY = "drras_admin_token";
+let bearerToken = readStoredToken();
+
+function readStoredToken() {
+  try {
+    return sessionStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberToken(token) {
+  bearerToken = token || null;
+  try {
+    if (token) sessionStorage.setItem(TOKEN_KEY, token);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* private mode: keep the token in memory only */
+  }
+}
 // A 401 immediately after signing in is not an expired session - it means the
 // browser never sent the cookie back (cross-site frame, or Secure cookie over
 // http). Saying "expired" there sends you looking in the wrong place.
@@ -18,7 +42,9 @@ let dashboardOpenedAt = 0;
 
 function sessionLostMessage() {
   if (dashboardOpenedAt && Date.now() - dashboardOpenedAt < 20000) {
-    return "Signed in, but the browser is not sending the session cookie back, so the dashboard cannot load. Open this site in its own tab (not inside a frame/preview), or restart the server with --cookie-samesite None over HTTPS.";
+    return bearerToken
+      ? "Signed in, but the server rejected the session token it just issued. The server was probably restarted - sign in again."
+      : "Signed in, but the browser is not returning the session cookie. Open this site in its own tab, or start the server with --allow-bearer-auth (works inside frames).";
   }
   return "Your admin session has expired. Sign in again.";
 }
@@ -31,15 +57,16 @@ class ApiError extends Error {
 }
 
 async function api(url, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
   const response = await fetch(url, {
     ...options,
     credentials: "same-origin",
     cache: "no-store",
-    headers: {
-      ...(options.headers || {}),
-    },
+    headers,
   });
   const body = await response.json().catch(() => ({}));
+  if (response.status === 401) rememberToken(null);
   if (!response.ok) {
     throw new ApiError(body.error || "The request could not be completed.", response.status);
   }
@@ -189,6 +216,7 @@ loginForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({ password: adminPassword.value }),
     });
     adminPassword.value = "";
+    rememberToken(result.sessionToken || null);
     dashboardOpenedAt = Date.now();
     showDashboard(result.csrfToken);
     try {
@@ -262,6 +290,7 @@ document.getElementById("logoutButton").addEventListener("click", async (event) 
       method: "POST",
       headers: { "X-CSRF-Token": csrfToken },
     });
+    rememberToken(null);
     showLogin("You have been signed out.");
   } catch (error) {
     if (error.status === 401) showLogin(sessionLostMessage());
@@ -274,6 +303,7 @@ document.getElementById("logoutButton").addEventListener("click", async (event) 
 async function initialize() {
   try {
     const session = await api("/api/admin/session");
+    if (session.sessionToken) rememberToken(session.sessionToken);
     showDashboard(session.csrfToken);
     await loadRequests();
   } catch (error) {
