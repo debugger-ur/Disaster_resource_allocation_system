@@ -128,7 +128,7 @@ Open `http://localhost:8000/` for the public site and `http://localhost:8000/adm
 - `PATCH /api/admin/requests/{id}` with `{"status":"accepted"}` or `{"status":"rejected"}` — requires the admin session and a CSRF token; a request can only be reviewed once.
 - `POST /api/admin/logout` — revokes the session.
 
-Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes, not in the browser or source. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, expire after eight hours, and admin mutations require a CSRF token. Login attempts are rate-limited. This small `http.server` implementation is a starter/demo, not a hardened public production server. Before public deployment, port the handlers to a production-grade application server (or a hardened gateway with strict request limits), use HTTPS and set `DRRAS_COOKIE_SECURE=1`, serve `/` and `/api` on the same origin, and configure backups/monitoring. A static-only host such as GitHub Pages cannot run this Python API by itself.
+Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes, not in the browser or source. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, expire after eight hours, and admin mutations require a CSRF token. Login attempts are rate-limited. This small `http.server` implementation is a starter/demo, not a hardened public production server. Before public deployment, port the handlers to a production-grade application server (or a hardened gateway with strict request limits), use HTTPS and set `DRRAS_COOKIE_SECURE=1`, serve `/` and `/api` on the same origin, and configure backups/monitoring. A static-only host such as GitHub Pages cannot run this Python API by itself; the frontend degrades to demo mode there (see Deployment).
 
 ### Connecting request storage to the rest of the project
 
@@ -182,7 +182,7 @@ WantedBy=multi-user.target
 
 ### 2. Static-only host (GitHub Pages) — dashboard works, submissions do not
 
-GitHub Pages, Netlify, and Vercel (static mode) cannot run Python, so on those hosts the site renders and every client-side feature works — dashboard, distance ranking, allocation, Dijkstra routes, CSV export — but **submitting a relief request and the admin dashboard report `Could not reach the request service`**, because there is no `/api`. Pointing Pages at the wrong folder adds a second, more confusing failure: with the source path set to `/` there is no `index.html` at the repository root, and the URL answers **"There isn't a GitHub Pages site here."** even though the build reports `status: built`.
+GitHub Pages, Netlify, and Vercel (static mode) cannot run Python, so on those hosts the site renders and every client-side feature works — dashboard, distance ranking, allocation, Dijkstra routes, CSV export — but the public request form and the admin dashboard cannot reach a real `/api`, so they run in **demo mode** — browser-local storage and a cosmetic passphrase (see below) rather than shared, authenticated state. Pointing Pages at the wrong folder adds a second, more confusing failure: with the source path set to `/` there is no `index.html` at the repository root, and the URL answers **"There isn't a GitHub Pages site here."** even though the build reports `status: built`.
 
 Check which one you have — a successful build with a 404 means the path, not the code:
 
@@ -193,7 +193,18 @@ gh api repos/<owner>/<repo>/pages/builds?per_page=1 --jq '.[0] | {status, error:
 
 Set it under **Settings → Pages → Build and deployment → Source: Deploy from a branch → `main` / `/docs`**, then open `https://<owner>.github.io/<repo>/`. If you cannot change that setting, the root `index.html` added here redirects into `docs/`, so `/` also serves the app; the repository-root `.nojekyll` exists so Jekyll leaves the folder alone in that configuration.
 
-Both pages use relative asset paths, so they render correctly under the project subpath (`/<repo>/docs/...`) rather than requesting `/css/...` from the domain root and coming back unstyled. Do not expect the request form or admin to work here — for that, use option 1, or point the form at a separately hosted instance of it.
+Both pages use relative asset paths, so they render correctly under the project subpath (`/<repo>/docs/...`) rather than requesting `/css/...` from the domain root and coming back unstyled.
+
+#### Demo mode: the form and admin still work, with honest limits
+
+`docs/js/requestService.js` probes `/api/health` on load. If a service answers, every call goes through it (shared SQLite, real authentication). If nothing answers — the Pages case — it degrades to **demo mode** instead of erroring: submissions are validated with the same rules the server uses and kept in `localStorage`, and the admin dashboard can be opened with the passphrase in `requestService.js` → `config.demoPassphrase`. Both pages show a banner saying so.
+
+Two things demo mode is not, which the code will not pretend otherwise:
+
+- **Not access control.** The check runs in the visitor's browser, so the passphrase is readable in the page source. It exists so a demo has a sign-in step, not to keep anyone out. Anyone who must be excluded needs the service in option 1.
+- **Not shared.** `localStorage` belongs to one browser profile, so an admin on Pages sees only requests submitted from that same browser. Cross-visitor intake requires the server, by definition.
+
+To turn the fallback off and fail loudly instead, set `config.allowDemoFallback = false`. To keep the Pages-hosted page but send data to a real service elsewhere, set `config.apiBase` to that origin — `/api/health` is then probed there, and demo mode never engages.
 
 ### 3. Console application
 

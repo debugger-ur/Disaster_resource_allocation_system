@@ -8,6 +8,7 @@ import { RouteManager } from "./routeManager.js";
 import { sortByDistance } from "./distanceCalculator.js";
 import { seedDisasters, seedResources, seedHospitals, seedShelters } from "./seedData.js";
 import { clearAll } from "./storage.js";
+import { bannerText, submitRequest } from "./requestService.js";
 import * as ui from "./ui.js";
 
 // ---- Initialize managers ----
@@ -85,14 +86,9 @@ ui.el("disasterForm").addEventListener("submit", async (e) => {
       latitude: Number(ui.el("dLat").value),
       longitude: Number(ui.el("dLon").value),
     };
-    const response = await fetch("/api/requests", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      cache: "no-store",
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || "The request could not be submitted.");
+    // Same call either way: the service posts to /api when it can and to
+    // browser storage when the site is hosted without a server.
+    const result = await submitRequest(payload);
     const request = result.request;
 
     // Requests are centrally stored and reviewed before entering operations.
@@ -101,6 +97,7 @@ ui.el("disasterForm").addEventListener("submit", async (e) => {
     const lines = [
       `Request ID       : ${request.id}`,
       `Review status    : PENDING`,
+      `Stored in        : ${result.mode === "server" ? "the shared request database" : "this browser only (no server)"}`,
       `Location         : ${request.locationName}`,
       ``,
       `Nearest Hospitals:`,
@@ -112,10 +109,7 @@ ui.el("disasterForm").addEventListener("submit", async (e) => {
     ui.showDistanceAnalysis(ui.el("disasterReportResult"), "REQUEST SUBMITTED — PENDING ADMIN REVIEW", lines);
     e.target.reset();
   } catch (err) {
-    const message = err instanceof TypeError
-      ? "Could not reach the request service. Start the DRRAS admin server and try again."
-      : err.message;
-    ui.showToast(message, true);
+    ui.showToast(err.message || "Could not reach the request service. Start the DRRAS admin server and try again.", true);
   } finally {
     submitButton.disabled = false;
     submitButton.textContent = originalLabel;
@@ -285,6 +279,16 @@ ui.el("resetDataBtn").addEventListener("click", () => {
   if (confirm("This will erase all stored data. Continue?")) {
     clearAll();
     location.reload();
+  }
+});
+
+// Say out loud when there is no server, so "submitted" is never mistaken for
+// "received by the control room".
+bannerText().then((text) => {
+  const banner = ui.el("serviceBanner");
+  if (banner && text) {
+    banner.textContent = text;
+    banner.hidden = false;
   }
 });
 
