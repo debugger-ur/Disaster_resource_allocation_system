@@ -10,7 +10,7 @@ Usage:
     python3 backend/admin_server.py                  # serve on http://0.0.0.0:8000
 
 Environment:
-    DRPAS/DRRAS_DB_PATH      absolute SQLite path (shared by password setup + server)
+    DRRAS_DB_PATH          absolute SQLite path (shared by password setup + server)
     DRRAS_COOKIE_SECURE      "1" to mark the session cookie Secure (use behind HTTPS)
     DRRAS_PORT / DRRAS_HOST  defaults for the bind address
 """
@@ -46,6 +46,14 @@ SESSION_LIFETIME = timedelta(hours=8)
 MIN_PASSWORD_LENGTH = 12
 PBKDF2_ITERATIONS = 210_000
 MAX_BODY_BYTES = 64 * 1024
+
+# SameSite=Strict is the right default for a normal deployment, but it makes the
+# session cookie invisible to any page embedded in a cross-site frame (an
+# in-app preview, an <iframe> on the college portal): the browser drops it, so
+# the first API call after signing in comes back 401 and the dashboard looks
+# "expired" within a second. Run with SameSite=None in that setup.
+COOKIE_SAMESITE_DEFAULT = "Strict"
+COOKIE_SAMESITE_VALUES = ("Strict", "Lax", "None")
 
 # Brute-force protection: at most this many failed sign-ins per IP per window.
 LOGIN_MAX_ATTEMPTS = 8
@@ -397,8 +405,13 @@ class DrrasHandler(SimpleHTTPRequestHandler):
     """Static files out of ``docs/`` plus the JSON API, on one origin."""
 
     server_version = "DRRAS/1.0"
+    # HTTP/1.1 keeps the browser's connections alive; every response below sets
+    # an explicit Content-Length, which keep-alive requires.
+    protocol_version = "HTTP/1.1"
     store: Store  # attached by the factory below
     cookie_secure = False
+    cookie_samesite = COOKIE_SAMESITE_DEFAULT
+    cookie_partitioned = False
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, directory=str(STATIC_ROOT), **kwargs)
@@ -471,11 +484,18 @@ class DrrasHandler(SimpleHTTPRequestHandler):
             f"{SESSION_COOKIE_NAME}={value}",
             "Path=/",
             "HttpOnly",
-            "SameSite=Strict",
+            f"SameSite={self.cookie_samesite}",
             f"Max-Age={max_age}",
         ]
-        if self.cookie_secure:
+        # Browsers reject SameSite=None unless the cookie is also Secure, and
+        # Secure cookies are dropped on plain http (except http://localhost).
+        if self.cookie_secure or self.cookie_samesite == "None":
             parts.append("Secure")
+        # CHIPS: Partitioned is only valid alongside SameSite=None; Secure, and
+        # it is what lets the session survive inside a cross-site iframe when the
+        # browser blocks ordinary third-party cookies.
+        if self.cookie_partitioned and self.cookie_samesite == "None":
+            parts.append("Partitioned")
         return "; ".join(parts)
 
     # ---- routing ----
@@ -602,14 +622,36 @@ class DrrasHandler(SimpleHTTPRequestHandler):
             self._send_json({"error": err.message}, err.status)
 
 
-def make_server(host: str, port: int, store: Store, cookie_secure: bool) -> ThreadingHTTPServer:
+def normalize_samesite(value: str) -> str:
+    """Validates the SameSite policy, accepting any capitalisation."""
+    cleaned = (value or "").strip().title()
+    if cleaned not in COOKIE_SAMESITE_VALUES:
+        raise ValueError(
+            "SameSite must be one of: " + ", ".join(COOKIE_SAMESITE_VALUES) + f" (got {value!r})."
+        )
+    return cleaned
+
+
+def make_server(
+    host: str,
+    port: int,
+    store: Store,
+    cookie_secure: bool,
+    cookie_samesite: str = COOKIE_SAMESITE_DEFAULT,
+    cookie_partitioned: bool = False,
+) -> ThreadingHTTPServer:
     # Bind the store onto a per-server subclass instead of mutating DrrasHandler
     # itself: the class is shared, so assigning to it would leak this server's
     # database into every other server in the process.
     handler = type(
         "BoundDrrasHandler",
         (DrrasHandler,),
-        {"store": store, "cookie_secure": cookie_secure},
+        {
+            "store": store,
+            "cookie_secure": cookie_secure,
+            "cookie_samesite": normalize_samesite(cookie_samesite),
+            "cookie_partitioned": bool(cookie_partitioned),
+        },
     )
     httpd = ThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
@@ -645,7 +687,31 @@ def main(argv: list[str] | None = None) -> int:
         default=int(os.environ.get("DRRAS_PORT", "8000")),
         help="port (default 8000; $PORT overrides for PaaS hosts)",
     )
+    parser.add_argument(
+        "--cookie-samesite",
+        default=os.environ.get("DRRAS_COOKIE_SAMESITE", COOKIE_SAMESITE_DEFAULT),
+        choices=COOKIE_SAMESITE_VALUES,
+        type=normalize_samesite,
+        help=(
+            "session cookie SameSite policy (default Strict). Use None when the "
+            "site is opened inside a cross-site frame or preview; it forces Secure, "
+            "so HTTPS is required. (env: DRRAS_COOKIE_SAMESITE)"
+        ),
+    )
+    parser.add_argument(
+        "--cookie-partitioned",
+        action="store_true",
+        default=os.environ.get("DRRAS_COOKIE_PARTITIONED", "") == "1",
+        help=(
+            "add the CHIPS Partitioned attribute (requires --cookie-samesite None); "
+            "needed when the site is embedded in an iframe on another domain and the "
+            "browser blocks third-party cookies. (env: DRRAS_COOKIE_PARTITIONED=1)"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.cookie_partitioned and args.cookie_samesite != "None":
+        parser.error("--cookie-partitioned requires --cookie-samesite None")
 
     # Platform-as-a-service hosts (Render, Railway, Fly) inject PORT and expect
     # the app to bind directly to it rather than to a fixed 8000.
@@ -663,7 +729,14 @@ def main(argv: list[str] | None = None) -> int:
 
     cookie_secure = os.environ.get("DRRAS_COOKIE_SECURE", "") == "1"
     try:
-        httpd = make_server(args.host, args.port, store, cookie_secure)
+        httpd = make_server(
+            args.host,
+            args.port,
+            store,
+            cookie_secure,
+            args.cookie_samesite,
+            args.cookie_partitioned,
+        )
     except OSError as err:
         print(f"Could not bind {args.host}:{args.port} - {err}", file=sys.stderr)
         print("Something else is probably using that port; try --port 8010.", file=sys.stderr)
@@ -672,6 +745,25 @@ def main(argv: list[str] | None = None) -> int:
     print(f"DRRAS site : http://localhost:{args.port}/")
     print(f"Admin UI   : http://localhost:{args.port}/admin")
     print(f"Database   : {store.path}")
+    cookie_flags = [f"SameSite={args.cookie_samesite}"]
+    if cookie_secure or args.cookie_samesite == "None":
+        cookie_flags.append("Secure")
+    if args.cookie_partitioned and args.cookie_samesite == "None":
+        cookie_flags.append("Partitioned")
+    print("Cookie     : " + "; ".join(cookie_flags))
+    if args.cookie_samesite == "None":
+        print(
+            "           SameSite=None needs https (http://localhost excepted). To open"
+            " the admin in a plain new tab instead, Strict is safer."
+        )
+    if args.cookie_samesite != "None" and not store.has_password():
+        # Only meaningful before the first sign-in, which is when this bites.
+        print(
+            "Tip: if this site is opened inside a frame/preview and sign-in appears to"
+            " expire instantly, restart with --cookie-samesite None (needs HTTPS)."
+        )
+    if cookie_secure and args.cookie_samesite == "None":
+        print("Note: SameSite=None is only honoured over https:// - http will drop the cookie.")
     if not store.has_password():
         print("No admin password yet -> python3 backend/admin_server.py --set-password")
     print("Ctrl-C to stop.")

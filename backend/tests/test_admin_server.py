@@ -6,6 +6,7 @@ Run from the repository root:
 
 from __future__ import annotations
 
+import http.cookiejar
 import json
 import sqlite3
 import sys
@@ -33,9 +34,18 @@ class ServerTestCase(unittest.TestCase):
         cls.store.set_password(PASSWORD)
 
     @classmethod
-    def _start(cls, db_path: Path, cookie_secure: bool = False):
+    def _start(
+        cls,
+        db_path: Path,
+        cookie_secure: bool = False,
+        cookie_samesite=None,
+        cookie_partitioned: bool = False,
+    ):
         store = admin_server.Store(db_path)
-        httpd = admin_server.make_server("127.0.0.1", 0, store, cookie_secure)
+        kwargs = {} if cookie_samesite is None else {"cookie_samesite": cookie_samesite}
+        if cookie_partitioned:
+            kwargs["cookie_partitioned"] = True
+        httpd = admin_server.make_server("127.0.0.1", 0, store, cookie_secure, **kwargs)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -396,6 +406,141 @@ class StaticAndMiscTests(ServerTestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+class CookiePolicyTests(ServerTestCase):
+    """The session cookie's attributes decide whether sign-in survives at all."""
+
+    def set_cookie_for(self, *, cookie_secure=False, cookie_samesite=None, cookie_partitioned=False):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        kwargs = {} if cookie_samesite is None else {"cookie_samesite": cookie_samesite}
+        httpd, store, base = self._start(
+            Path(tmp.name) / "c.sqlite3", cookie_secure, cookie_partitioned=cookie_partitioned, **kwargs
+        )
+        store.set_password(PASSWORD)
+        try:
+            req = urllib.request.Request(
+                base + "/api/admin/login",
+                data=json.dumps({"password": PASSWORD}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req) as resp:
+                return resp.headers.get("Set-Cookie", "")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_default_is_strict_and_not_secure(self):
+        cookie = self.set_cookie_for()
+        self.assertIn("SameSite=Strict", cookie)
+        self.assertNotIn("Secure", cookie)
+        self.assertIn("HttpOnly", cookie)
+
+    def test_none_implies_secure(self):
+        # Browsers refuse SameSite=None without Secure, so the pair is mandatory.
+        cookie = self.set_cookie_for(cookie_samesite="None")
+        self.assertIn("SameSite=None", cookie)
+        self.assertIn("Secure", cookie)
+
+    def test_lax_is_supported_for_same_site_embeds(self):
+        cookie = self.set_cookie_for(cookie_samesite="Lax")
+        self.assertIn("SameSite=Lax", cookie)
+        self.assertNotIn("Secure", cookie)
+
+    def test_cookie_name_path_and_max_age_present(self):
+        cookie = self.set_cookie_for(cookie_samesite="None")
+        self.assertTrue(cookie.startswith(admin_server.SESSION_COOKIE_NAME + "="))
+        self.assertIn("Path=/", cookie)
+        self.assertIn(f"Max-Age={int(admin_server.SESSION_LIFETIME.total_seconds())}", cookie)
+
+    def test_strict_policy_round_trips_over_plain_http(self):
+        """Baseline that the iframe case lacks: with Strict and no Secure flag the
+        cookie is stored and returned, so sign-in survives the next request."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        # Strict + no Secure flag: usable over plain http.
+        httpd, store, base = self._start(Path(tmp.name) / "s.sqlite3", False)
+        store.set_password(PASSWORD)
+        record = store.create_request(
+            admin_server.validate_request_payload(
+                {
+                    "type": "FLOOD",
+                    "severity": "HIGH",
+                    "affectedPeople": 5,
+                    "requiredResources": [],
+                    "locationName": "Test",
+                    "latitude": 1.0,
+                    "longitude": 2.0,
+                }
+            )
+        )
+        try:
+            jar = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            login = urllib.request.Request(
+                base + "/api/admin/login",
+                data=json.dumps({"password": PASSWORD}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            opener.open(login).read()
+            payload = json.loads(opener.open(base + "/api/admin/requests").read())
+            self.assertIn(record["id"], [r["id"] for r in payload["requests"]])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_secure_cookie_from_none_policy_is_not_sent_over_plain_http(self):
+        """Pins the trap: choosing None on a plain-http host reproduces the exact
+        'signed in but immediately unauthenticated' failure, because Secure cookies
+        are withheld. Use None only behind TLS."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        httpd, store, base = self._start(Path(tmp.name) / "h.sqlite3", False, cookie_samesite="None")
+        store.set_password(PASSWORD)
+        try:
+            jar = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            login = urllib.request.Request(
+                base + "/api/admin/login",
+                data=json.dumps({"password": PASSWORD}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            opener.open(login).read()
+            cookie = next(c for c in jar if c.name == admin_server.SESSION_COOKIE_NAME)
+            self.assertTrue(cookie.secure, "None must imply Secure")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                opener.open(base + "/api/admin/requests")
+            self.assertEqual(ctx.exception.code, 401)  # cookie stored, never sent
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_rejects_unknown_policy(self):
+        with self.assertRaises(ValueError):
+            admin_server.normalize_samesite("Nope")
+        for good in ("strict", "LAX", "none", " None "):
+            self.assertIn(admin_server.normalize_samesite(good), ("Strict", "Lax", "None"))
+
+    def test_partitioned_attribute_for_embedded_frames(self):
+        cookie = self.set_cookie_for(cookie_samesite="None", cookie_partitioned=True)
+        self.assertIn("Partitioned", cookie)
+        self.assertIn("SameSite=None", cookie)
+        self.assertIn("Secure", cookie)
+
+    def test_partitioned_is_ignored_without_none(self):
+        # Browsers reject Partitioned unless SameSite=None, so it is dropped rather
+        # than emitting a cookie that would be silently discarded.
+        cookie = self.set_cookie_for(cookie_samesite="Strict", cookie_partitioned=True)
+        self.assertNotIn("Partitioned", cookie)
+
+    def test_cli_refuses_partitioned_without_none(self):
+        with self.assertRaises(SystemExit) as ctx:
+            admin_server.main(["--cookie-partitioned"])
+        self.assertEqual(ctx.exception.code, 2)
 
 
 class ValidationUnitTests(unittest.TestCase):

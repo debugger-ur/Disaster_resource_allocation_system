@@ -11,6 +11,17 @@ const statusFilter = document.getElementById("statusFilter");
 
 let csrfToken = null;
 let requests = [];
+// A 401 immediately after signing in is not an expired session - it means the
+// browser never sent the cookie back (cross-site frame, or Secure cookie over
+// http). Saying "expired" there sends you looking in the wrong place.
+let dashboardOpenedAt = 0;
+
+function sessionLostMessage() {
+  if (dashboardOpenedAt && Date.now() - dashboardOpenedAt < 20000) {
+    return "Signed in, but the browser is not sending the session cookie back, so the dashboard cannot load. Open this site in its own tab (not inside a frame/preview), or restart the server with --cookie-samesite None over HTTPS.";
+  }
+  return "Your admin session has expired. Sign in again.";
+}
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -178,11 +189,12 @@ loginForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({ password: adminPassword.value }),
     });
     adminPassword.value = "";
+    dashboardOpenedAt = Date.now();
     showDashboard(result.csrfToken);
     try {
       await loadRequests();
     } catch (error) {
-      if (error.status === 401) showLogin("Your admin session has expired. Sign in again.");
+      if (error.status === 401) showLogin(sessionLostMessage());
       else dashboardMessage.textContent = error.message;
     }
   } catch (error) {
@@ -204,7 +216,7 @@ document.getElementById("refreshButton").addEventListener("click", async (event)
   try {
     await loadRequests();
   } catch (error) {
-    if (error.status === 401) showLogin("Your admin session has expired. Sign in again.");
+    if (error.status === 401) showLogin(sessionLostMessage());
     else dashboardMessage.textContent = error.message;
   } finally {
     button.disabled = false;
@@ -234,7 +246,7 @@ requestRows.addEventListener("click", async (event) => {
     });
     await loadRequests();
   } catch (error) {
-    if (error.status === 401) showLogin("Your admin session has expired. Sign in again.");
+    if (error.status === 401) showLogin(sessionLostMessage());
     else {
       await loadRequests().catch(() => {});
       dashboardMessage.textContent = error.message;
@@ -252,7 +264,7 @@ document.getElementById("logoutButton").addEventListener("click", async (event) 
     });
     showLogin("You have been signed out.");
   } catch (error) {
-    if (error.status === 401) showLogin("Your admin session has expired. Sign in again.");
+    if (error.status === 401) showLogin(sessionLostMessage());
     else dashboardMessage.textContent = error.message;
   } finally {
     button.disabled = false;

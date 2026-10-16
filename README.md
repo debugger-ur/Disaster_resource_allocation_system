@@ -149,7 +149,7 @@ python3 backend/admin_server.py --set-password   # prompts twice, min 12 chars
 python3 backend/admin_server.py                  # http://0.0.0.0:8000  (+ /admin)
 ```
 
-Useful flags/env vars: `--port`, `--host`, `--db`, or `DRRAS_DB_PATH` / `DRRAS_PORT` / `PORT` / `DRRAS_COOKIE_SECURE=1`. The `--set-password` step must point at the same database file you then serve, or the new server starts with no credentials and the login screen reports `No admin password is configured`.
+Useful flags/env vars: `--port`, `--host`, `--db`, `--cookie-samesite`, `--cookie-partitioned`, or `DRRAS_DB_PATH` / `DRRAS_PORT` / `PORT` / `DRRAS_COOKIE_SECURE=1` / `DRRAS_COOKIE_SAMESITE` / `DRRAS_COOKIE_PARTITIONED=1`. The `--set-password` step must point at the same database file you then serve, or the new server starts with no credentials and the login screen reports `No admin password is configured`.
 
 **Docker (simplest reproducible deploy).** The image carries no third-party dependencies:
 
@@ -197,6 +197,36 @@ cd "Disaster Relief System" && ./build/drras
 ```
 
 Running it from the repository root instead creates an empty, stray `data/` folder there rather than reading `Disaster Relief System/data/`.
+
+### Troubleshooting: "session expired" the instant you sign in
+
+If the admin dashboard signs in and immediately bounces back with a session
+message, the session is **not** expiring — the browser is not returning the
+session cookie, and the API answers `401`, which the page reports as expiry. The
+cookie defaults to `SameSite=Strict`, which is correct for a normal site but is
+**withheld whenever the page is loaded inside a frame on another domain** (an IDE
+preview, an `<iframe>` on the college portal). Check the server log: `POST
+/api/admin/login 200` followed immediately by `GET /api/admin/requests 401` is
+this exact problem, not a password or clock issue.
+
+Two fixes, in order of preference:
+
+1. **Open the site in its own browser tab** (top-level, not embedded). No server
+   change needed, and `Strict` stays in force.
+2. **If it must be embedded**, relax the policy and serve over HTTPS:
+
+```bash
+python3 backend/admin_server.py --cookie-samesite None            # needs https
+python3 backend/admin_server.py --cookie-samesite None --cookie-partitioned  # + CHIPS
+```
+
+`None` automatically adds `Secure`, and browsers then **drop the cookie on plain
+http** (only `http://localhost` is exempt) — so `None` over `http://192.168.x.x`
+reproduces the same 401 loop. `--cookie-partitioned` is for browsers that block
+third-party cookies outright inside iframes; it is refused unless paired with
+`None`. Use the same flags as env vars (`DRRAS_COOKIE_SAMESITE`,
+`DRRAS_COOKIE_PARTITIONED=1`) for containers. Sessions otherwise last 8 hours, so
+a genuine expiry after that is expected behaviour.
 
 ### Pre-public checklist
 
