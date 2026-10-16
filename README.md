@@ -45,8 +45,8 @@ Existing logistics/inventory-management tools are generic and not disaster-speci
 
 ### Clone the repository
 ```bash
-git clone https://github.com/<org-or-user>/disaster-resource-allocation-system.git
-cd disaster-resource-allocation-system
+git clone https://github.com/debugger-ur/Disaster_resource_allocation_system.git
+cd Disaster_resource_allocation_system
 ```
 
 ### Build
@@ -128,13 +128,158 @@ Open `http://localhost:8000/` for the public site and `http://localhost:8000/adm
 - `PATCH /api/admin/requests/{id}` with `{"status":"accepted"}` or `{"status":"rejected"}` — requires the admin session and a CSRF token; a request can only be reviewed once.
 - `POST /api/admin/logout` — revokes the session.
 
-Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes, not in the browser or source. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, expire after eight hours, and admin mutations require a CSRF token. Login attempts are rate-limited. This small `http.server` implementation is a starter/demo, not a hardened public production server. Before public deployment, port the handlers to a production-grade application server (or a hardened gateway with strict request limits), use HTTPS and set `DRRAS_COOKIE_SECURE=1`, serve `/` and `/api` on the same origin, and configure backups/monitoring. A static-only host such as GitHub Pages cannot run this Python API by itself.
+Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes, not in the browser or source. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, expire after eight hours, and admin mutations require a CSRF token. Login attempts are rate-limited. This small `http.server` implementation is a starter/demo, not a hardened public production server. Before public deployment, port the handlers to a production-grade application server (or a hardened gateway with strict request limits), use HTTPS and set `DRRAS_COOKIE_SECURE=1`, serve `/` and `/api` on the same origin, and configure backups/monitoring. A static-only host such as GitHub Pages cannot run this Python API by itself; the frontend degrades to demo mode there (see Deployment).
 
 ### Connecting request storage to the rest of the project
 
 The checked-in project did not have a shared web database: `docs/js/storage.js` stored the browser demo data in that browser's `localStorage`, while the separate C++ console program persists records as CSV using `FileManager`. A server cannot read a visitor's `localStorage`, so the request form was wired to this SQLite-backed API; that SQLite database is now the shared source of truth for web requests and admin review. Existing browser-local records are not automatically imported, and the admin decision does not automatically dispatch resources or write into the C++ CSV files.
 
 If you already have a server-side request database, keep the browser route contract above and replace the persistence methods in `backend/admin_server.py` (`Store.create_request`, `Store.list_requests`, and `Store.set_request_status`) with calls to that database/repository. Keep the password/session/CSRF checks in the HTTP layer. If accepted requests must become operational C++ disasters, add an explicit promotion/export adapter after acceptance; do not point both stores at files that are being rewritten independently. Back up the SQLite file and restrict filesystem access to the service account.
+
+## Deployment
+
+The project deploys as **two independent pieces**. Decide which one you need: the console program is compiled and run by its users, and only the web module is "deployed" in the server sense.
+
+### 1. Web app (site + request API) — needs a server, not a static host
+
+`backend/admin_server.py` serves `docs/` **and** `/api` from one origin, so the browser's relative `fetch("/api/...")` calls resolve. It needs three things a static host cannot give it: a Python process, a writable disk for SQLite, and a persistent filesystem.
+
+```bash
+python3 backend/admin_server.py --set-password   # prompts twice, min 12 chars
+python3 backend/admin_server.py                  # http://0.0.0.0:8000  (+ /admin)
+```
+
+Useful flags/env vars: `--port`, `--host`, `--db`, `--cookie-samesite`, `--cookie-partitioned`, `--allow-bearer-auth`, or `DRRAS_DB_PATH` / `DRRAS_PORT` / `PORT` / `DRRAS_COOKIE_SECURE=1` / `DRRAS_COOKIE_SAMESITE` / `DRRAS_COOKIE_PARTITIONED=1` / `DRRAS_ALLOW_BEARER_AUTH=1`. The `--set-password` step must point at the same database file you then serve, or the new server starts with no credentials and the login screen reports `No admin password is configured`.
+
+**Docker (simplest reproducible deploy).** The image carries no third-party dependencies:
+
+```bash
+docker build -t drras .
+docker volume create drras-data
+docker run -d --name drras -p 8000:8000 -v drras-data:/data drras
+docker exec -it drras python3 backend/admin_server.py --set-password   # once
+```
+
+The `-v drras-data:/data` is what keeps requests and the password alive across restarts; the container defaults `DRRAS_DB_PATH` to `/data/drras.sqlite3`. Omit the volume and a rebuild wipes the database.
+
+**PaaS (Render / Railway / Fly.io).** Build `python3 backend/admin_server.py`, start command `python3 backend/admin_server.py`, health check path `/api/health`. The platform injects `PORT` and the app binds to it. These hosts have **ephemeral** filesystems: you must attach a persistent disk mounted at `/data` (and set `DRRAS_DB_PATH=/data/drras.sqlite3`), or every deploy/restart discards submitted requests.
+
+**VM/VPS with systemd.** Put the SQLite file on the service account's own path and front it with nginx/Caddy for HTTPS:
+
+```ini
+# /etc/systemd/system/drras.service
+[Service]
+Environment=DRRAS_DB_PATH=/var/lib/drras/drras.sqlite3
+Environment=DRRAS_COOKIE_SECURE=1
+Environment=DRRAS_PORT=8000
+ExecStart=/usr/bin/python3 /srv/drras/backend/admin_server.py
+Restart=always
+[Install]
+WantedBy=multi-user.target
+```
+
+`DRRAS_COOKIE_SECURE=1` must only be set when TLS terminates in front of the app, otherwise the browser drops the session cookie and you can never sign in. Run `mkdir -p /var/lib/drras` and back that file up; it is the whole web datastore.
+
+### 2. Static-only host (GitHub Pages) — dashboard works, submissions do not
+
+GitHub Pages, Netlify, and Vercel (static mode) cannot run Python, so on those hosts the site renders and every client-side feature works — dashboard, distance ranking, allocation, Dijkstra routes, CSV export — but the public request form and the admin dashboard cannot reach a real `/api`, so they run in **demo mode** — browser-local storage and a cosmetic passphrase (see below) rather than shared, authenticated state. Pointing Pages at the wrong folder adds a second, more confusing failure: with the source path set to `/` there is no `index.html` at the repository root, and the URL answers **"There isn't a GitHub Pages site here."** even though the build reports `status: built`.
+
+Check which one you have — a successful build with a 404 means the path, not the code:
+
+```bash
+gh api repos/<owner>/<repo>/pages --jq '.source'   # want {"branch":"main","path":"/docs"}
+gh api repos/<owner>/<repo>/pages/builds?per_page=1 --jq '.[0] | {status, error: .error.message}'
+```
+
+Set it under **Settings → Pages → Build and deployment → Source: Deploy from a branch → `main` / `/docs`**, then open `https://<owner>.github.io/<repo>/`. If you cannot change that setting, the root `index.html` added here redirects into `docs/`, so `/` also serves the app; the repository-root `.nojekyll` exists so Jekyll leaves the folder alone in that configuration.
+
+Both pages use relative asset paths, so they render correctly under the project subpath (`/<repo>/docs/...`) rather than requesting `/css/...` from the domain root and coming back unstyled.
+
+#### Demo mode: the form and admin still work, with honest limits
+
+`docs/js/requestService.js` probes `/api/health` on load. If a service answers, every call goes through it (shared SQLite, real authentication). If nothing answers — the Pages case — it degrades to **demo mode** instead of erroring: submissions are validated with the same rules the server uses and kept in `localStorage`, and the admin dashboard can be opened with the passphrase in `requestService.js` → `config.demoPassphrase` (default `demo-mode`). Both pages show a banner saying so. Keep that value throwaway: this file is public, so putting your real `--set-password` credential here publishes it.
+
+Two things demo mode is not, which the code will not pretend otherwise:
+
+- **Not access control.** The check runs in the visitor's browser, so the passphrase is readable in the page source and anyone can open the demo dashboard. It exists so a demo has a sign-in step, not to keep anyone out. Anyone who must be excluded needs the service in option 1.
+- **Not shared.** `localStorage` belongs to one browser profile, so an admin on Pages sees only requests submitted from that same browser. Cross-visitor intake requires the server, by definition.
+
+To turn the fallback off and fail loudly instead, set `config.allowDemoFallback = false`. To keep the Pages-hosted page but send data to a real service elsewhere, set `config.apiBase` to that origin — `/api/health` is then probed there, and demo mode never engages.
+
+### 3. Console application
+
+Not deployed at all — built per machine, and it must run *from inside* its folder so the relative `data/` CSV paths resolve:
+
+```bash
+cmake -S "Disaster Relief System" -B "Disaster Relief System/build"
+cmake --build "Disaster Relief System/build"
+cd "Disaster Relief System" && ./build/drras
+```
+
+Running it from the repository root instead creates an empty, stray `data/` folder there rather than reading `Disaster Relief System/data/`.
+
+### Troubleshooting: "session expired" the instant you sign in
+
+If the admin dashboard signs in and immediately bounces back with a session
+message, the session is **not** expiring — the browser is not returning the
+session cookie, and the API answers `401`, which the page reports as expiry. The
+cookie defaults to `SameSite=Strict`, which is correct for a normal site but is
+**withheld whenever the page is loaded inside a frame on another domain** (an IDE
+preview, an `<iframe>` on the college portal). Check the server log: `POST
+/api/admin/login 200` followed immediately by `GET /api/admin/requests 401` is
+this exact problem, not a password or clock issue.
+
+Two fixes, in order of preference:
+
+1. **Open the site in its own browser tab** (top-level, not embedded). No server
+   change needed, and `Strict` stays in force.
+2. **If it must be embedded**, cookies may be unavailable no matter what you set —
+   recent browsers block third-party cookies in cross-site frames outright, and
+   Safari blocks them regardless of `SameSite`. In that case stop relying on
+   cookies and let the page authenticate with a header instead:
+
+```bash
+python3 backend/admin_server.py --allow-bearer-auth
+```
+
+Sign-in then also returns a `sessionToken`, which the admin page keeps in
+`sessionStorage` and sends as `Authorization: Bearer …`. It needs no cookie, so it
+works inside any frame, and mutations over this path skip the CSRF token by design
+(a cross-site page cannot forge that header). The cookie path is unaffected and
+remains the default: without the flag the server never issues a token and
+`Authorization` grants nothing. The trade-off is real — a token readable by page
+script widens the XSS blast radius versus an `HttpOnly` cookie — so this is opt-in,
+per-tab, and cleared on logout and on any `401`.
+
+For a cookie-only deployment, relaxing the policy is enough:
+
+```bash
+python3 backend/admin_server.py --cookie-samesite None            # needs https
+python3 backend/admin_server.py --cookie-samesite None --cookie-partitioned  # + CHIPS
+```
+
+`None` automatically adds `Secure`, and browsers then **drop the cookie on plain
+http** (only `http://localhost` is exempt) — so `None` over `http://192.168.x.x`
+reproduces the same 401 loop. `--cookie-partitioned` is for browsers that block
+third-party cookies outright inside iframes; it is refused unless paired with
+`None`. Use the same flags as env vars (`DRRAS_COOKIE_SAMESITE`,
+`DRRAS_COOKIE_PARTITIONED=1`, `DRRAS_ALLOW_BEARER_AUTH=1`) for containers. Sessions
+otherwise last 8 hours, so a genuine expiry after that is expected behaviour.
+
+If a fix you deployed does not seem to take effect, suspect the cache, not the
+code: the browser may serve `admin.js` straight from disk without asking. The
+server answers HTML with `Cache-Control: no-cache` so entry points always
+revalidate, and `docs/admin.html` references its assets as `?v=N` — bump `N` when
+you change `docs/js/admin.js` or `docs/css/admin.css`, and hard-reload (Ctrl+Shift+R).
+
+### Pre-public checklist
+
+- Change the demo password; 12+ characters, and never commit it or the `.sqlite3` file (`backend/data/` is git-ignored).
+- Serve over HTTPS and set `DRRAS_COOKIE_SECURE=1`.
+- This is a stdlib `http.server`-based demo: single-process, no proxy trust — the `X-Forwarded-For` rate limiter trusts whatever the client sends unless a reverse gateway overwrites it, so put nginx/Caddy in front and rate-limit there too. Do not expose the port directly.
+- Keep `/` and `/api` same-origin (the client uses relative URLs and `credentials: "same-origin"`).
+- Back up the SQLite file; schedule it, don't rely on the host's disk.
+- Accepted requests are recorded only in SQLite — they do not auto-dispatch resources or write into the C++ CSVs.
 
 ## Assumptions
 
