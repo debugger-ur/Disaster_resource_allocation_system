@@ -46,6 +46,9 @@ SESSION_LIFETIME = timedelta(hours=8)
 MIN_PASSWORD_LENGTH = 12
 PBKDF2_ITERATIONS = 210_000
 MAX_BODY_BYTES = 64 * 1024
+# Bodies beyond this are never read; the connection is closed instead, so a
+# huge Content-Length cannot hold the keep-alive socket hostage.
+HARD_BODY_CAP = 8 * 1024 * 1024
 
 # SameSite=Strict is the right default for a normal deployment, but it makes the
 # session cookie invisible to any page embedded in a cross-site frame (an
@@ -440,16 +443,38 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def _read_json(self) -> object:
+    def drain_body(self) -> None:
+        """Read the whole request body before anything else.
+
+        Every request path must drain the socket, including the ones that reject
+        the call: BaseHTTPRequestHandler reuses this connection for the next
+        request, so leftover body bytes would be parsed as its request line and
+        answered as a bogus method (501) - request desynchronisation, not a
+        4xx. Reading first and deciding second keeps the stream aligned.
+        """
+        self._body = b""
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
+            self.close_connection = True
             raise ApiError("Invalid Content-Length.") from None
         if length <= 0:
-            return {}
-        if length > MAX_BODY_BYTES:
+            return
+        if length > HARD_BODY_CAP:
+            # Refuse and drop the connection rather than read it or leave it.
+            self.close_connection = True
             raise ApiError("Request body is too large.", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-        raw = self.rfile.read(length)
+        self._body = self.rfile.read(length)
+        if len(self._body) < length:
+            # Client promised more than it sent; the stream is no longer trustworthy.
+            self.close_connection = True
+
+    def _read_json(self) -> object:
+        raw = getattr(self, "_body", b"")
+        if not raw:
+            return {}
+        if len(raw) > MAX_BODY_BYTES:
+            raise ApiError("Request body is too large.", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         try:
             return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -547,9 +572,19 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         self.do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
+        try:
+            self.drain_body()
+        except ApiError as err:
+            self._send_json({"error": err.message}, err.status)
+            return
         self._route_post(self.path.split("?", 1)[0])
 
     def do_PATCH(self) -> None:  # noqa: N802
+        try:
+            self.drain_body()
+        except ApiError as err:
+            self._send_json({"error": err.message}, err.status)
+            return
         self._route_patch(self.path.split("?", 1)[0])
 
     def end_headers(self) -> None:

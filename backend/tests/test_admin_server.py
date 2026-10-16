@@ -6,6 +6,7 @@ Run from the repository root:
 
 from __future__ import annotations
 
+import http.client
 import http.cookiejar
 import json
 import sqlite3
@@ -669,6 +670,135 @@ class BearerAuthTests(ServerTestCase):
             )
             self.assertEqual(status, 401, guess)
         self.assertEqual(store.get_request(record["id"])["status"], "pending")
+
+
+class KeepAliveFramingTests(unittest.TestCase):
+    """Reuse ONE connection across requests.
+
+    urllib opens a fresh socket per call, so it cannot see a stream that drifted:
+    if a handler answers without consuming the request body, the leftover bytes
+    are parsed as the *next* request's line and answered 501 "Unsupported method".
+    These are the regression tests for that desynchronisation.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.store = admin_server.Store(Path(cls.tmp.name) / "ka.sqlite3")
+        cls.store.set_password(PASSWORD)
+        cls.httpd = admin_server.make_server("127.0.0.1", 0, cls.store, False)
+        cls.httpd.daemon_threads = True
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+        cls.port = cls.httpd.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.tmp.cleanup()
+
+    def conn(self):
+        return http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+
+    def test_error_response_with_body_leaves_the_stream_aligned(self):
+        c = self.conn()
+        try:
+            # wrong password: rejected before any of the body is needed
+            c.request("POST", "/api/admin/login", body=json.dumps({"password": "x" * 40}),
+                      headers={"Content-Type": "application/json"})
+            first = c.getresponse()
+            self.assertEqual(first.status, 401)
+            self.assertEqual(json.loads(first.read() or b"{}")["error"], "Incorrect password.")
+
+            # the request that used to come back as 501 "Unsupported method"
+            c.request("GET", "/api/health")
+            second = c.getresponse()
+            self.assertEqual(second.status, 200)
+            self.assertEqual(json.loads(second.read())["status"], "ok")
+        finally:
+            c.close()
+
+    def test_endpoint_that_ignores_its_body_still_drains_it(self):
+        # POST /api/admin/logout parses nothing; it must still consume the body.
+        token, csrf = self.store.create_session()
+        c = self.conn()
+        try:
+            c.request("POST", "/api/admin/logout", body="{}",
+                      headers={"Cookie": f"{admin_server.SESSION_COOKIE_NAME}={token}",
+                               "X-CSRF-Token": csrf, "Content-Type": "application/json"})
+            resp = c.getresponse()
+            self.assertEqual(resp.status, 200)
+            resp.read()
+
+            for path in ("/api/health", "/api/admin/session", "/api/admin/requests"):
+                c.request("GET", path)
+                got = c.getresponse()
+                self.assertNotEqual(got.status, 501, path)
+                self.assertIn(got.status, (200, 401), path)
+                got.read()
+        finally:
+            c.close()
+
+    def test_unauthenticated_mutation_with_a_body_does_not_poison_the_socket(self):
+        c = self.conn()
+        try:
+            c.request("PATCH", "/api/admin/requests/REQ-00000000", body=json.dumps({"status": "accepted"}),
+                      headers={"Content-Type": "application/json"})
+            resp = c.getresponse()
+            self.assertEqual(resp.status, 401, "auth is checked, and the body is drained")
+            resp.read()
+
+            c.request("POST", "/api/requests", body=json.dumps({"type": "NOT_A_TYPE"}),
+                      headers={"Content-Type": "application/json"})
+            second = c.getresponse()
+            self.assertEqual(second.status, 400)
+            self.assertIn("error", json.loads(second.read()))
+        finally:
+            c.close()
+
+    def test_malformed_json_is_reported_not_smuggler(self):
+        c = self.conn()
+        try:
+            c.request("POST", "/api/requests", body=b"{not json at all",
+                      headers={"Content-Type": "application/json"})
+            resp = c.getresponse()
+            self.assertEqual(resp.status, 400)
+            self.assertIn("valid JSON", json.loads(resp.read())["error"])
+            c.request("GET", "/api/health")
+            self.assertEqual(c.getresponse().status, 200)
+        finally:
+            c.close()
+
+    def test_oversized_body_closes_the_connection(self):
+        c = self.conn()
+        try:
+            c.putrequest("POST", "/api/requests")
+            c.putheader("Content-Type", "application/json")
+            # Declared far beyond the hard cap: refused, and the socket is dropped
+            # rather than left holding unread bytes.
+            c.putheader("Content-Length", str(admin_server.HARD_BODY_CAP + 10))
+            c.endheaders()
+            resp = c.getresponse()
+            self.assertEqual(resp.status, 413)
+        except (http.client.RemoteDisconnected, ConnectionResetError, OSError):
+            pass  # torn down outright: also a safe outcome
+        finally:
+            c.close()
+
+    def test_truncated_body_is_not_treated_as_the_next_request(self):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
+        try:
+            c.putrequest("POST", "/api/requests")
+            c.putheader("Content-Type", "application/json")
+            c.putheader("Content-Length", "500")
+            c.endheaders(b'{"type": "FLOOD"}')  # 16 of the promised 500 bytes
+            try:
+                resp = c.getresponse()
+                self.assertIn(resp.status, (400, 408, 501))
+            except (http.client.RemoteDisconnected, ConnectionResetError, OSError):
+                pass  # server hung up: acceptable, better than desync
+        finally:
+            c.close()
 
 
 class StaticCachingTests(ServerTestCase):

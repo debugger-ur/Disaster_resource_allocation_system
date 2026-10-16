@@ -19,6 +19,7 @@
 
   <main class="page-shell">
     <section id="loginSection" class="login-layout" aria-labelledby="loginHeading">
+      <p id="serviceBanner" class="mode-banner" hidden></p>
       <div class="intro-copy">
         <p class="eyebrow">CONTROL ROOM</p>
         <h1 id="loginHeading">Admin sign in</h1>
@@ -37,7 +38,7 @@
                minlength="12" maxlength="1024" required>
         <button id="loginButton" class="button button-primary button-wide" type="submit">Sign in</button>
         <p id="loginMessage" class="message" role="alert" aria-live="polite"></p>
-        <p class="login-help">No default password is configured. The site operator creates it on the server.</p>
+        <p class="login-help">Server-backed: the operator sets this with --set-password. Static hosting (Pages): the page uses the demo passphrase in requestService.js, which is a formality, not protection.</p>
       </form>
     </section>
 
