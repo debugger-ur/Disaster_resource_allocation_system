@@ -45,8 +45,8 @@ Existing logistics/inventory-management tools are generic and not disaster-speci
 
 ### Clone the repository
 ```bash
-git clone https://github.com/<org-or-user>/disaster-resource-allocation-system.git
-cd disaster-resource-allocation-system
+git clone https://github.com/debugger-ur/Disaster_resource_allocation_system.git
+cd Disaster_resource_allocation_system
 ```
 
 ### Build
@@ -135,6 +135,77 @@ Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes, not in the browser or 
 The checked-in project did not have a shared web database: `docs/js/storage.js` stored the browser demo data in that browser's `localStorage`, while the separate C++ console program persists records as CSV using `FileManager`. A server cannot read a visitor's `localStorage`, so the request form was wired to this SQLite-backed API; that SQLite database is now the shared source of truth for web requests and admin review. Existing browser-local records are not automatically imported, and the admin decision does not automatically dispatch resources or write into the C++ CSV files.
 
 If you already have a server-side request database, keep the browser route contract above and replace the persistence methods in `backend/admin_server.py` (`Store.create_request`, `Store.list_requests`, and `Store.set_request_status`) with calls to that database/repository. Keep the password/session/CSRF checks in the HTTP layer. If accepted requests must become operational C++ disasters, add an explicit promotion/export adapter after acceptance; do not point both stores at files that are being rewritten independently. Back up the SQLite file and restrict filesystem access to the service account.
+
+## Deployment
+
+The project deploys as **two independent pieces**. Decide which one you need: the console program is compiled and run by its users, and only the web module is "deployed" in the server sense.
+
+### 1. Web app (site + request API) — needs a server, not a static host
+
+`backend/admin_server.py` serves `docs/` **and** `/api` from one origin, so the browser's relative `fetch("/api/...")` calls resolve. It needs three things a static host cannot give it: a Python process, a writable disk for SQLite, and a persistent filesystem.
+
+```bash
+python3 backend/admin_server.py --set-password   # prompts twice, min 12 chars
+python3 backend/admin_server.py                  # http://0.0.0.0:8000  (+ /admin)
+```
+
+Useful flags/env vars: `--port`, `--host`, `--db`, or `DRRAS_DB_PATH` / `DRRAS_PORT` / `PORT` / `DRRAS_COOKIE_SECURE=1`. The `--set-password` step must point at the same database file you then serve, or the new server starts with no credentials and the login screen reports `No admin password is configured`.
+
+**Docker (simplest reproducible deploy).** The image carries no third-party dependencies:
+
+```bash
+docker build -t drras .
+docker volume create drras-data
+docker run -d --name drras -p 8000:8000 -v drras-data:/data drras
+docker exec -it drras python3 backend/admin_server.py --set-password   # once
+```
+
+The `-v drras-data:/data` is what keeps requests and the password alive across restarts; the container defaults `DRRAS_DB_PATH` to `/data/drras.sqlite3`. Omit the volume and a rebuild wipes the database.
+
+**PaaS (Render / Railway / Fly.io).** Build `python3 backend/admin_server.py`, start command `python3 backend/admin_server.py`, health check path `/api/health`. The platform injects `PORT` and the app binds to it. These hosts have **ephemeral** filesystems: you must attach a persistent disk mounted at `/data` (and set `DRRAS_DB_PATH=/data/drras.sqlite3`), or every deploy/restart discards submitted requests.
+
+**VM/VPS with systemd.** Put the SQLite file on the service account's own path and front it with nginx/Caddy for HTTPS:
+
+```ini
+# /etc/systemd/system/drras.service
+[Service]
+Environment=DRRAS_DB_PATH=/var/lib/drras/drras.sqlite3
+Environment=DRRAS_COOKIE_SECURE=1
+Environment=DRRAS_PORT=8000
+ExecStart=/usr/bin/python3 /srv/drras/backend/admin_server.py
+Restart=always
+[Install]
+WantedBy=multi-user.target
+```
+
+`DRRAS_COOKIE_SECURE=1` must only be set when TLS terminates in front of the app, otherwise the browser drops the session cookie and you can never sign in. Run `mkdir -p /var/lib/drras` and back that file up; it is the whole web datastore.
+
+### 2. Static-only host (GitHub Pages) — dashboard works, submissions do not
+
+GitHub Pages, Netlify, and Vercel (static mode) cannot run Python, so on those hosts the site renders and every client-side feature works — dashboard, distance ranking, allocation, Dijkstra routes, CSV export — but **submitting a relief request and the admin dashboard report `Could not reach the request service`**, because there is no `/api`. The checked-in `docs/.nojekyll` plus Pages serving the `docs/` folder is exactly this configuration.
+
+If you choose it: **Settings → Pages → Source: Deploy from a branch → `main` / `/docs`**, then open `https://<user>.github.io/<repo>/`. Both pages now use relative asset paths, so they render correctly under the project subpath. Do not expect the form to work there; point the form at a separately hosted instance of option 1 instead, or keep the demo local.
+
+### 3. Console application
+
+Not deployed at all — built per machine, and it must run *from inside* its folder so the relative `data/` CSV paths resolve:
+
+```bash
+cmake -S "Disaster Relief System" -B "Disaster Relief System/build"
+cmake --build "Disaster Relief System/build"
+cd "Disaster Relief System" && ./build/drras
+```
+
+Running it from the repository root instead creates an empty, stray `data/` folder there rather than reading `Disaster Relief System/data/`.
+
+### Pre-public checklist
+
+- Change the demo password; 12+ characters, and never commit it or the `.sqlite3` file (`backend/data/` is git-ignored).
+- Serve over HTTPS and set `DRRAS_COOKIE_SECURE=1`.
+- This is a stdlib `http.server`-based demo: single-process, no proxy trust — the `X-Forwarded-For` rate limiter trusts whatever the client sends unless a reverse gateway overwrites it, so put nginx/Caddy in front and rate-limit there too. Do not expose the port directly.
+- Keep `/` and `/api` same-origin (the client uses relative URLs and `credentials: "same-origin"`).
+- Back up the SQLite file; schedule it, don't rely on the host's disk.
+- Accepted requests are recorded only in SQLite — they do not auto-dispatch resources or write into the C++ CSVs.
 
 ## Assumptions
 
