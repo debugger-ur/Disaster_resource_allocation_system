@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <set>
+#include <sstream>
 
 namespace drras {
 
