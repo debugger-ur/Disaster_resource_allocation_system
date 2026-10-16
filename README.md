@@ -197,11 +197,11 @@ Both pages use relative asset paths, so they render correctly under the project 
 
 #### Demo mode: the form and admin still work, with honest limits
 
-`docs/js/requestService.js` probes `/api/health` on load. If a service answers, every call goes through it (shared SQLite, real authentication). If nothing answers — the Pages case — it degrades to **demo mode** instead of erroring: submissions are validated with the same rules the server uses and kept in `localStorage`, and the admin dashboard can be opened with the passphrase in `requestService.js` → `config.demoPassphrase`. Both pages show a banner saying so.
+`docs/js/requestService.js` probes `/api/health` on load. If a service answers, every call goes through it (shared SQLite, real authentication). If nothing answers — the Pages case — it degrades to **demo mode** instead of erroring: submissions are validated with the same rules the server uses and kept in `localStorage`, and the admin dashboard can be opened with the passphrase in `requestService.js` → `config.demoPassphrase` (default `demo-mode`). Both pages show a banner saying so. Keep that value throwaway: this file is public, so putting your real `--set-password` credential here publishes it.
 
 Two things demo mode is not, which the code will not pretend otherwise:
 
-- **Not access control.** The check runs in the visitor's browser, so the passphrase is readable in the page source. It exists so a demo has a sign-in step, not to keep anyone out. Anyone who must be excluded needs the service in option 1.
+- **Not access control.** The check runs in the visitor's browser, so the passphrase is readable in the page source and anyone can open the demo dashboard. It exists so a demo has a sign-in step, not to keep anyone out. Anyone who must be excluded needs the service in option 1.
 - **Not shared.** `localStorage` belongs to one browser profile, so an admin on Pages sees only requests submitted from that same browser. Cross-visitor intake requires the server, by definition.
 
 To turn the fallback off and fail loudly instead, set `config.allowDemoFallback = false`. To keep the Pages-hosted page but send data to a real service elsewhere, set `config.apiBase` to that origin — `/api/health` is then probed there, and demo mode never engages.

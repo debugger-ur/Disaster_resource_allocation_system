@@ -17,9 +17,10 @@ export const config = {
   apiBase: "",
   // Flip to false to hard-fail instead of degrading to browser storage.
   allowDemoFallback: true,
-  // Cosmetic gate for static hosting only. Change it if a stranger may see the
-  // site; it is readable in the page source by anyone.
-  demoPassphrase: "demo-pass-2026",
+  // Cosmetic gate for static hosting only, and readable in the page source by
+  // anyone. Use a throwaway value: never the real password you set with
+  // --set-password, or publishing this file publishes that credential.
+  demoPassphrase: "demo-mode",
 };
 
 const DEMO_REQUESTS_KEY = "drras_requests";
