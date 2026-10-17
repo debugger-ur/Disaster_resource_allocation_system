@@ -22,7 +22,7 @@ export class RouteManager {
 
   // Builds a sparse simulated road graph from k-nearest neighbours.
   buildSimulatedNetwork(kNearest = 3) {
-    const ROAD_FACTOR = 1.15; // roads are rarely perfectly straight
+    const ROAD_FACTOR = 1.0; // roads are rarely perfectly straight
     for (const [name, info] of this.nodes) {
       const distances = [];
       for (const [other, otherInfo] of this.nodes) {
