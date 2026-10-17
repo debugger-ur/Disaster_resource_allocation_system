@@ -47,7 +47,7 @@ function buildRouteNetwork() {
   resourceManager.getAll().forEach((r) => routeManager.addLocation(r.locationName, r.latitude, r.longitude));
   hospitalManager.getAll().forEach((h) => routeManager.addLocation(h.name, h.latitude, h.longitude));
   shelterManager.getAll().forEach((s) => routeManager.addLocation(s.name, s.latitude, s.longitude));
-  routeManager.buildSimulatedNetwork(3);
+  routeManager.buildSimulatedNetwork(5);
 }
 
 // ---- Refresh everything visible ----
