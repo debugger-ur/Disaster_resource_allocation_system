@@ -619,12 +619,20 @@ class DrrasHandler(SimpleHTTPRequestHandler):
                 self._require_admin()
                 self._send_json({"requests": self.store.list_requests()})
                 return
-            if path.startswith("/api/admin/requests/"):
+                        if path.startswith("/api/admin/requests/"):
                 self._require_admin()
                 request_id = unquote(path.rsplit("/", 1)[-1])
                 record = self.store.get_request(request_id)
                 if record is None:
                     raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
+                self._send_json({"request": record})
+                return
+            # Public endpoint: users can check their own request status by ID
+            if path.startswith("/api/requests/"):
+                request_id = unquote(path.rsplit("/", 1)[-1])
+                record = self.store.get_request(request_id)
+                if record is None:
+                    raise ApiError("That request was not found.", HTTPStatus.NOT_FOUND)
                 self._send_json({"request": record})
                 return
             raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
