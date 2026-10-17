@@ -293,3 +293,66 @@ bannerText().then((text) => {
 });
 
 refreshAll();
+
+// ================= STATUS MESSAGE HELPER =================
+function getStatusDetails(status) {
+  const s = String(status || "pending").toLowerCase();
+  if (s === "accepted") {
+    return {
+      title: "Relief Request Accepted — Help is En Route!",
+      message: "Your relief request has been APPROVED by the command center. Emergency resources have been allocated and relief units are being dispatched to your location.",
+      advice: "Please stay in a safe, accessible area and keep your communication line open for response personnel.",
+      badgeClass: "status-badge accepted",
+      badgeText: "ACCEPTED",
+    };
+  } else if (s === "rejected") {
+    return {
+      title: "Request Reviewed and Closed",
+      message: "Your relief request was reviewed and closed by coordinators. This typically happens if the zone is already covered by ongoing operations, duplicate requests were merged, or immediate assistance is redirected through primary emergency services.",
+      advice: "If you are in immediate life-threatening danger, please contact local emergency authorities or call 112 directly.",
+      badgeClass: "status-badge rejected",
+      badgeText: "DECLINED / CLOSED",
+    };
+  } else {
+    return {
+      title: "Request Received — Awaiting Coordinator Review",
+      message: "Your relief request has been received and logged into the emergency dispatch queue. Emergency coordinators are reviewing severity and matching available ambulances, teams, and supplies in your area.",
+      advice: "Save your Request ID. Check back here periodically for updates on coordinator decisions and dispatch progress.",
+      badgeClass: "status-badge pending",
+      badgeText: "PENDING REVIEW",
+    };
+  }
+}
+
+function renderStatusCard(container, req, details) {
+  const status = (req.status || "pending").toLowerCase();
+  const reqRes = Array.isArray(req.requiredResources) && req.requiredResources.length
+    ? req.requiredResources.join(", ")
+    : "None";
+  const submitted = req.submittedAt ? new Date(req.submittedAt).toLocaleString() : "Recently";
+  const decided = req.decidedAt ? new Date(req.decidedAt).toLocaleString() : (status === "pending" ? "Awaiting decision" : "—");
+
+  container.innerHTML = `
+    <div class="status-alert ${status}">
+      <div class="status-alert-header">
+        <div>
+          <h3>${details.title}</h3>
+          <span style="font-family: monospace; font-size: 0.95rem; font-weight: bold; color: #374151;">
+            ID: ${req.id}
+          </span>
+        </div>
+        <span class="${details.badgeClass}">${details.badgeText}</span>
+      </div>
+      <p class="status-message-text"><strong>Status Update:</strong> ${details.message}</p>
+      <p class="status-advice-text">👉 <strong>Next Steps:</strong> ${details.advice}</p>
+      <div class="request-meta-grid">
+        <div class="request-meta-item"><strong>Location</strong><span>${req.locationName || "—"}</span></div>
+        <div class="request-meta-item"><strong>Disaster & Severity</strong><span>${req.type || "—"} (${req.severity || "—"})</span></div>
+        <div class="request-meta-item"><strong>Resources Needed</strong><span>${reqRes}</span></div>
+        <div class="request-meta-item"><strong>Affected People</strong><span>${Number(req.affectedPeople || 0).toLocaleString()}</span></div>
+        <div class="request-meta-item"><strong>Submitted</strong><span>${submitted}</span></div>
+        <div class="request-meta-item"><strong>Decision Time</strong><span>${decided}</span></div>
+      </div>
+    </div>
+  `;
+}
