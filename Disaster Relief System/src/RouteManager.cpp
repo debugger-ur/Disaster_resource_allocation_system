@@ -31,7 +31,7 @@ void RouteManager::addEdge(const std::string &a, const std::string &b, double we
 void RouteManager::buildSimulatedNetwork(int kNearest) {
     // Road-factor: real roads are never perfectly straight, so we scale
     // the straight-line Haversine distance up slightly to simulate this.
-    constexpr double ROAD_FACTOR = 1.15;
+    constexpr double ROAD_FACTOR = 1.0;
 
     for (const auto &[name, info] : nodes) {
         std::vector<std::pair<std::string, double>> distances;
