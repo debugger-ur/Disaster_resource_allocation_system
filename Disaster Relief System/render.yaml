@@ -1,0 +1,38 @@
+# Render Blueprint for DRRAS (web UI + request-review API).
+# https://render.com/docs/blueprint-spec
+#
+# This encodes the deployment settings so you don't have to type them by hand:
+# - Docker runtime (Render picks up the Dockerfile at the repo root)
+# - a persistent disk at /data so the SQLite database (requests + admin
+#   password) survives deploys and restarts — Render's disk needs a paid
+#   instance type, not the Free plan
+# - the environment variables the app reads (see README "Deployment")
+#
+# PORT is intentionally NOT set: Render injects it and the app binds to it.
+
+services:
+  - type: web
+    name: drras
+    runtime: docker
+    healthCheckPath: /api/health
+    disk:
+      name: drras-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      # Admin sign-in password (min 12 characters). sync: false = Render asks
+      # for the value when you create the service; mark it Secret afterwards.
+      - key: DRRAS_ADMIN_PASSWORD
+        sync: false
+      # The site is served over Render's HTTPS.
+      - key: DRRAS_COOKIE_SECURE
+        value: "1"
+      # Only needed when the site is embedded in a cross-site frame (an iframe
+      # on another domain): Strict cookies would be dropped there. Leave these
+      # commented out for a normal top-level site.
+      # - key: DRRAS_COOKIE_SAMESITE
+      #   value: "None"
+      # - key: DRRAS_COOKIE_PARTITIONED
+      #   value: "1"
+      # - key: DRRAS_ALLOW_BEARER_AUTH
+      #   value: "1"
