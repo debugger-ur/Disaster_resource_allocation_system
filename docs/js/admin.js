@@ -12,12 +12,11 @@ const statusFilter = document.getElementById("statusFilter");
 import {
   bannerText,
   decideRequest,
-  listInventory,
   listRequests,
   login,
-  setInventoryQuantity,
   logout,
   sessionState,
+  DEFAULT_DECISION_MESSAGES,
 } from "./requestService.js";
 
 let csrfToken = null;
@@ -77,13 +76,12 @@ function formatDate(value) {
 }
 
 function setSummaryCounts(allRequests) {
-  const counts = { pending: 0, accepted: 0, partially_approved: 0, rejected: 0 };
+  const counts = { pending: 0, accepted: 0, rejected: 0 };
   allRequests.forEach((request) => {
     if (Object.hasOwn(counts, request.status)) counts[request.status] += 1;
   });
   document.getElementById("pendingCount").textContent = counts.pending;
   document.getElementById("acceptedCount").textContent = counts.accepted;
-  document.getElementById("partialCount").textContent = counts.partially_approved;
   document.getElementById("rejectedCount").textContent = counts.rejected;
   document.getElementById("totalCount").textContent = allRequests.length;
 }
@@ -127,35 +125,34 @@ function renderRequests() {
       ),
     );
 
-    const itemCell = element("td");
-    itemCell.append(element("div", "resource-list", request.itemName || "Relief supplies"));
-    if (request.isCritical) itemCell.append(element("span", "severity severity-critical", "Critical"));
-
-    const quantityCell = element("td", "quantity-cell");
-    quantityCell.append(element("div", "", `${Number(request.requestedQuantity || 0)} requested`));
-    quantityCell.append(element("div", "reviewed-note", `${Number(request.allocatedQuantity || 0)} allocated`));
-
     const resourcesCell = element("td");
-    resourcesCell.append(
-      element(
-        "div",
-        "resource-list",
-        request.requiredResources?.length ? request.requiredResources.join(", ") : "No specific resources",
-      ),
-    );
+    const quantities = request.resourceQuantities || {};
+    const granted = request.grantedResources || {};
+    const resourcesText = request.requiredResources?.length
+      ? request.requiredResources.map((category) => {
+          const asked = quantities[category];
+          const given = granted[category];
+          if (!asked) return category;
+          return given !== undefined ? `${category} × ${asked} → ${given}` : `${category} × ${asked}`;
+        }).join(", ")
+      : "No specific resources";
+    resourcesCell.append(element("div", "resource-list", resourcesText));
+    if (request.userMessage) {
+      resourcesCell.append(element("div", "user-message-note", `To user: ${request.userMessage}`));
+    }
 
     const submittedCell = element("td");
     submittedCell.append(element("div", "submitted-time", formatDate(request.submittedAt)));
 
     const decisionCell = element("td", "decision-cell");
-    const statusLabel = request.status === "partially_approved"
-      ? "Partially approved"
-      : request.status;
     decisionCell.append(
-      element("span", `status-pill status-${request.status}`, statusLabel),
+      element("span", `status-pill status-${request.status}`, request.status),
     );
     if (request.decidedAt) {
       decisionCell.append(element("div", "reviewed-note", `Reviewed ${formatDate(request.decidedAt)}`));
+    }
+    if (request.decisionMessage) {
+      decisionCell.append(element("div", "decision-message-note", `To user: ${request.decisionMessage}`));
     }
 
     const actionsCell = element("td", "action-cell");
@@ -176,37 +173,18 @@ function renderRequests() {
       actionsCell.append(element("span", "reviewed-note", "Reviewed"));
     }
 
-    row.append(requestCell, locationCell, itemCell, quantityCell, resourcesCell, submittedCell, decisionCell, actionsCell);
+    row.append(requestCell, locationCell, resourcesCell, submittedCell, decisionCell, actionsCell);
     requestRows.append(row);
   }
 }
 
-async function loadRequests({ clearMessage = true } = {}) {
-  if (clearMessage) {
-    dashboardMessage.textContent = "";
-    dashboardMessage.classList.remove("success");
-  }
+async function loadRequests() {
+  dashboardMessage.textContent = "";
   const result = await listRequests();
   setDemoNotice(Boolean(result.demo));
   requests = Array.isArray(result.requests) ? result.requests : [];
   setSummaryCounts(requests);
   renderRequests();
-}
-
-async function loadInventory() {
-  const result = await listInventory();
-  setDemoNotice(Boolean(result.demo));
-  const rows = document.getElementById("inventoryRows");
-  rows.replaceChildren();
-  for (const item of result.inventory || []) {
-    const row = document.createElement("tr");
-    row.append(
-      element("td", "", item.itemName),
-      element("td", "", Number(item.availableQuantity).toLocaleString()),
-      element("td", "submitted-time", formatDate(item.updatedAt)),
-    );
-    rows.append(row);
-  }
 }
 
 loginForm.addEventListener("submit", async (event) => {
@@ -221,7 +199,7 @@ loginForm.addEventListener("submit", async (event) => {
     setDemoNotice(Boolean(result.demo));
     showDashboard(result.csrfToken);
     try {
-      await Promise.all([loadRequests(), loadInventory()]);
+      await loadRequests();
     } catch (error) {
       if (error.status === 401) showLogin(sessionLostMessage());
       else dashboardMessage.textContent = error.message;
@@ -241,7 +219,7 @@ document.getElementById("refreshButton").addEventListener("click", async (event)
   button.disabled = true;
   dashboardMessage.textContent = "";
   try {
-    await Promise.all([loadRequests(), loadInventory()]);
+    await loadRequests();
   } catch (error) {
     if (error.status === 401) showLogin(sessionLostMessage());
     else dashboardMessage.textContent = error.message;
@@ -250,57 +228,68 @@ document.getElementById("refreshButton").addEventListener("click", async (event)
   }
 });
 
-document.getElementById("inventoryForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const button = document.getElementById("inventorySaveButton");
-  const message = document.getElementById("inventoryMessage");
-  button.disabled = true;
-  message.textContent = "";
+// ---- decision dialog: every accept/reject ships with a message to the user ----
+
+const decisionDialog = document.getElementById("decisionDialog");
+const decisionDialogTitle = document.getElementById("decisionDialogTitle");
+const decisionDialogIntro = document.getElementById("decisionDialogIntro");
+const decisionMessageInput = document.getElementById("decisionMessage");
+const decisionConfirm = document.getElementById("decisionConfirm");
+const decisionCancel = document.getElementById("decisionCancel");
+const decisionError = document.getElementById("decisionError");
+let pendingDecision = null;
+
+function openDecisionDialog(request, action) {
+  pendingDecision = { request, action };
+  const accepting = action === "accepted";
+  decisionDialogTitle.textContent = accepting
+    ? `Accept request ${request.id}`
+    : `Reject request ${request.id}`;
+  decisionDialogIntro.textContent = accepting
+    ? "The request will be marked accepted. The message below is delivered to the user with your decision."
+    : "The request will be marked rejected. The message below is delivered to the user with your decision.";
+  decisionMessageInput.value = DEFAULT_DECISION_MESSAGES[action] || "";
+  decisionError.textContent = "";
+  if (typeof decisionDialog.showModal === "function") decisionDialog.showModal();
+  else decisionDialog.setAttribute("open", "");
+}
+
+function closeDecisionDialog() {
+  pendingDecision = null;
+  if (typeof decisionDialog.close === "function") decisionDialog.close();
+  else decisionDialog.removeAttribute("open");
+}
+
+decisionCancel.addEventListener("click", closeDecisionDialog);
+
+decisionConfirm.addEventListener("click", async () => {
+  if (!pendingDecision) return;
+  const { request, action } = pendingDecision;
+  decisionConfirm.disabled = true;
+  decisionError.textContent = "";
+  dashboardMessage.textContent = "";
   try {
-    const result = await setInventoryQuantity(
-      document.getElementById("inventoryItemName").value,
-      Number(document.getElementById("inventoryQuantity").value),
-      csrfToken,
-    );
-    setDemoNotice(Boolean(result.demo));
-    message.textContent = `${result.item.itemName}: ${Number(result.item.availableQuantity).toLocaleString()} units available.`;
-    await loadInventory();
+    await decideRequest(request.id, action, csrfToken, decisionMessageInput.value);
+    closeDecisionDialog();
+    await loadRequests();
   } catch (error) {
-    message.textContent = error.message || "Could not save inventory stock.";
+    if (error.status === 401) {
+      closeDecisionDialog();
+      showLogin(sessionLostMessage());
+    } else {
+      decisionError.textContent = error.message;
+    }
   } finally {
-    button.disabled = false;
+    decisionConfirm.disabled = false;
   }
 });
 
-requestRows.addEventListener("click", async (event) => {
+requestRows.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action][data-request-id]");
   if (!button || button.disabled) return;
   const request = requests.find((item) => item.id === button.dataset.requestId);
   if (!request || request.status !== "pending") return;
-
-  const action = button.dataset.action;
-  if (action === "rejected" && !window.confirm(`Reject request ${request.id}?`)) return;
-
-  const rowButtons = button.closest("tr").querySelectorAll("button");
-  rowButtons.forEach((item) => { item.disabled = true; });
-  dashboardMessage.textContent = "";
-  dashboardMessage.classList.remove("success");
-  try {
-    const outcome = await decideRequest(request.id, action, csrfToken);
-    await Promise.all([
-      loadRequests({ clearMessage: false }).catch(() => {}),
-      loadInventory().catch(() => {}),
-    ]);
-    dashboardMessage.textContent = `User will see: ${outcome.messageToUser}`;
-    dashboardMessage.classList.add("success");
-  } catch (error) {
-    if (error.status === 401) showLogin(sessionLostMessage());
-    else {
-      await Promise.all([loadRequests({ clearMessage: false }), loadInventory()]).catch(() => {});
-      dashboardMessage.textContent = error.message;
-      dashboardMessage.classList.remove("success");
-    }
-  }
+  openDecisionDialog(request, button.dataset.action);
 });
 
 document.getElementById("logoutButton").addEventListener("click", async (event) => {
@@ -329,7 +318,7 @@ async function initialize() {
     const session = await sessionState();
     setDemoNotice(Boolean(session.demo));
     showDashboard(session.csrfToken);
-    await Promise.all([loadRequests(), loadInventory()]);
+    await loadRequests();
   } catch (error) {
     if (error.status === 401) showLogin();
     else showLogin(error.message || "The admin service could not be reached. Please try again shortly.");
