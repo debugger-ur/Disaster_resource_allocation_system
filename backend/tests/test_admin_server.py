@@ -64,7 +64,9 @@ class ServerTestCase(unittest.TestCase):
     def setUp(self) -> None:
         # Isolate each test's rows/sessions without touching the shared schema.
         with self.store._connect() as conn:
+            conn.execute("DELETE FROM notifications")
             conn.execute("DELETE FROM requests")
+            conn.execute("DELETE FROM inventory_items")
             conn.execute("DELETE FROM sessions")
             conn.execute("DELETE FROM login_attempts")
         self.cookies: str | None = None
@@ -72,7 +74,14 @@ class ServerTestCase(unittest.TestCase):
 
     # ---- HTTP plumbing ----
 
-    def _request(self, method: str, path: str, body=None, csrf: bool = False):
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body=None,
+        csrf: bool = False,
+        notification_token: str | None = None,
+    ):
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.base + path, data=data, method=method)
         if data is not None:
@@ -81,6 +90,8 @@ class ServerTestCase(unittest.TestCase):
             req.add_header("Cookie", self.cookies)
         if csrf and self.csrf:
             req.add_header("X-CSRF-Token", self.csrf)
+        if notification_token:
+            req.add_header("X-Notification-Token", notification_token)
         try:
             with urllib.request.urlopen(req) as resp:
                 payload = json.loads(resp.read() or b"{}")
@@ -93,14 +104,20 @@ class ServerTestCase(unittest.TestCase):
                 payload = {"raw": raw.decode(errors="replace")}
             return err.code, payload, err.headers
 
-    def get(self, path):
-        return self._request("GET", path)
+    def get(self, path, notification_token=None):
+        return self._request("GET", path, notification_token=notification_token)
 
-    def post(self, path, body=None, csrf=False):
-        return self._request("POST", path, body if body is not None else {}, csrf=csrf)
+    def post(self, path, body=None, csrf=False, notification_token=None):
+        return self._request(
+            "POST", path, body if body is not None else {}, csrf=csrf,
+            notification_token=notification_token,
+        )
 
-    def patch(self, path, body=None, csrf=False):
-        return self._request("PATCH", path, body if body is not None else {}, csrf=csrf)
+    def patch(self, path, body=None, csrf=False, notification_token=None):
+        return self._request(
+            "PATCH", path, body if body is not None else {}, csrf=csrf,
+            notification_token=notification_token,
+        )
 
     def login(self, password: str = PASSWORD):
         status, payload, headers = self.post("/api/admin/login", {"password": password})
@@ -110,7 +127,7 @@ class ServerTestCase(unittest.TestCase):
             self.cookies = raw.split(";")[0]
         return status, payload, headers
 
-    def make_request(self, **overrides):
+    def make_request(self, notification_token=None, **overrides):
         payload = {
             "type": "FLOOD",
             "severity": "CRITICAL",
@@ -121,7 +138,7 @@ class ServerTestCase(unittest.TestCase):
             "longitude": 79.43,
         }
         payload.update(overrides)
-        return self.post("/api/requests", payload)
+        return self.post("/api/requests", payload, notification_token=notification_token)
 
     def unique(self, **overrides):
         """Create a request whose id cannot collide across tests."""
@@ -137,6 +154,10 @@ class PublicRequestTests(ServerTestCase):
         self.assertEqual(record["status"], "pending")
         self.assertEqual(record["affectedPeople"], 250)
         self.assertEqual(record["requiredResources"], ["Ambulance", "MedicalTeam"])
+        self.assertEqual(record["itemName"], "Ambulance")
+        self.assertEqual(record["requestedQuantity"], 0)
+        self.assertEqual(record["allocatedQuantity"], 0)
+        self.assertTrue(record["isCritical"])
         self.assertAlmostEqual(record["latitude"], 29.02)
         self.assertIsNotNone(record["submittedAt"])
         self.assertIsNone(record["decidedAt"])
@@ -149,6 +170,10 @@ class PublicRequestTests(ServerTestCase):
         self.assertIsInstance(record["longitude"], float)
         self.assertIsInstance(record["type"], str)
         self.assertIsInstance(record["requiredResources"], list)
+        self.assertIsInstance(record["itemName"], str)
+        self.assertIsInstance(record["requestedQuantity"], int)
+        self.assertIsInstance(record["allocatedQuantity"], int)
+        self.assertIsInstance(record["isCritical"], bool)
 
     def test_rejects_unknown_type(self):
         status, payload, _ = self.make_request(type="HURRICANE")
@@ -288,6 +313,164 @@ class ReviewTests(ServerTestCase):
         self.login()
         status, _, _ = self.patch("/api/admin/requests/REQ-NOPE1234", {"status": "accepted"}, csrf=True)
         self.assertEqual(status, 404)
+
+    def test_full_approval_generates_correct_message(self):
+        self.store.set_inventory_quantity("Water", 10)
+        status, created, _ = self.make_request(
+            severity="HIGH", requiredResources=["Supply"], itemName="Water", requestedQuantity=4
+        )
+        self.assertEqual(status, 201)
+        record = created["request"]
+        notification_token = created["notificationToken"]
+
+        self.login()
+        status, response, _ = self.patch(
+            f"/api/admin/requests/{record['id']}", {"status": "accepted"}, csrf=True
+        )
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["request"]["allocatedQuantity"], 4)
+        self.assertEqual(response["request"]["status"], "accepted")
+        self.assertEqual(self.store.list_inventory()[0]["availableQuantity"], 6)
+        expected = (
+            f"Your request #{record['id']} for 4 Water has been approved. "
+            "You will receive the full requested quantity."
+        )
+        self.assertEqual(response["message_to_user"], expected)
+        status, messages, _ = self.get("/api/notifications", notification_token)
+        self.assertEqual(status, 200)
+        self.assertEqual(messages["notifications"][0]["message"], expected)
+        self.assertEqual(messages["notifications"][0]["status"], "UNREAD")
+
+    def test_rejection_generates_correct_message(self):
+        self.store.set_inventory_quantity("Water", 12)
+        status, created, _ = self.make_request(
+            severity="HIGH", itemName="Water", requestedQuantity=5
+        )
+        self.assertEqual(status, 201)
+        record = created["request"]
+
+        self.login()
+        reason = "Duplicate request already covered by the nearby shelter"
+        status, response, _ = self.patch(
+            f"/api/admin/requests/{record['id']}",
+            {"status": "rejected", "reason": reason},
+            csrf=True,
+        )
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["request"]["status"], "rejected")
+        self.assertEqual(response["request"]["allocatedQuantity"], 0)
+        self.assertEqual(self.store.list_inventory()[0]["availableQuantity"], 12)
+        self.assertIn("has been rejected. Reason: " + reason, response["message_to_user"])
+
+    def test_partial_approval_for_critical_request(self):
+        self.store.set_inventory_quantity("Drinking water", 4)
+        status, created, _ = self.make_request(
+            severity="CRITICAL", itemName="Drinking water", requestedQuantity=10
+        )
+        self.assertEqual(status, 201)
+        record = created["request"]
+
+        self.login()
+        status, response, _ = self.patch(
+            f"/api/admin/requests/{record['id']}", {"status": "accepted"}, csrf=True
+        )
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["request"]["status"], "partially_approved")
+        self.assertEqual(response["request"]["allocatedQuantity"], 4)
+        self.assertEqual(self.store.list_inventory()[0]["availableQuantity"], 0)
+        message = response["message_to_user"]
+        self.assertIn(f"request #{record['id']} for 10 Drinking water", message)
+        self.assertIn("partially approved", message)
+        self.assertIn("only 4 units are currently in stock", message)
+        self.assertIn("providing 4 units now", message)
+        status, saved, _ = self.get("/api/notifications", created["notificationToken"])
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["notifications"][0]["message"], message)
+
+    def test_non_critical_excess_request_behavior(self):
+        self.store.set_inventory_quantity("Blankets", 3)
+        status, created, _ = self.make_request(
+            severity="HIGH", itemName="Blankets", requestedQuantity=8
+        )
+        self.assertEqual(status, 201)
+        record = created["request"]
+
+        self.login()
+        status, response, _ = self.patch(
+            f"/api/admin/requests/{record['id']}", {"status": "accepted"}, csrf=True
+        )
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["request"]["status"], "rejected")
+        self.assertEqual(response["request"]["allocatedQuantity"], 0)
+        self.assertEqual(self.store.list_inventory()[0]["availableQuantity"], 3)
+        self.assertIn("has been rejected", response["message_to_user"])
+        self.assertIn("not marked critical", response["message_to_user"])
+
+    def test_admin_inventory_endpoint_requires_admin_and_csrf(self):
+        self.assertEqual(self.get("/api/admin/inventory")[0], 401)
+        self.login()
+        status, _, _ = self.post(
+            "/api/admin/inventory", {"itemName": "Water", "availableQuantity": 6}
+        )
+        self.assertEqual(status, 403)
+        status, saved, _ = self.post(
+            "/api/admin/inventory", {"itemName": "Water", "availableQuantity": 6}, csrf=True
+        )
+        self.assertEqual(status, 200, saved)
+        self.assertEqual(saved["item"]["availableQuantity"], 6)
+        status, payload, _ = self.get("/api/admin/inventory")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["inventory"][0]["itemName"], "Water")
+
+    def test_notifications_list_endpoint(self):
+        self.store.set_inventory_quantity("Water", 10)
+        self.store.set_inventory_quantity("Blankets", 10)
+        self.store.set_inventory_quantity("Bandages", 10)
+        status, first, _ = self.make_request(
+            severity="HIGH", itemName="Water", requestedQuantity=1
+        )
+        self.assertEqual(status, 201)
+        notification_token = first["notificationToken"]
+        first_id = first["request"]["id"]
+
+        status, second, _ = self.make_request(
+            notification_token=notification_token,
+            severity="HIGH", itemName="Blankets", requestedQuantity=1,
+        )
+        self.assertEqual(status, 201)
+        second_id = second["request"]["id"]
+        status, other, _ = self.make_request(
+            severity="HIGH", itemName="Bandages", requestedQuantity=1
+        )
+        self.assertEqual(status, 201)
+        other_id = other["request"]["id"]
+
+        self.login()
+        for request_id in (first_id, second_id, other_id):
+            status, _, _ = self.patch(
+                f"/api/admin/requests/{request_id}", {"status": "accepted"}, csrf=True
+            )
+            self.assertEqual(status, 200)
+
+        status, payload, _ = self.get("/api/notifications", notification_token)
+        self.assertEqual(status, 200)
+        notifications = payload["notifications"]
+        self.assertEqual(len(notifications), 2)
+        self.assertEqual({item["requestId"] for item in notifications}, {first_id, second_id})
+        self.assertNotIn(other_id, {item["requestId"] for item in notifications})
+
+        unread = notifications[0]
+        status, updated, _ = self.patch(
+            f"/api/notifications/{unread['id']}",
+            {"status": "READ"},
+            notification_token=notification_token,
+        )
+        self.assertEqual(status, 200, updated)
+        self.assertEqual(updated["notification"]["status"], "READ")
+        status, refreshed, _ = self.get("/api/notifications", notification_token)
+        self.assertEqual(status, 200)
+        self.assertIn("READ", {item["status"] for item in refreshed["notifications"]})
+        self.assertEqual(self.get("/api/notifications")[0], 401)
 
 
 class AuthTests(ServerTestCase):
@@ -855,7 +1038,20 @@ class ValidationUnitTests(unittest.TestCase):
     def test_missing_optional_resources_defaults_to_empty(self):
         payload = self.base_payload()
         del payload["requiredResources"]
-        self.assertEqual(admin_server.validate_request_payload(payload)["requiredResources"], [])
+        validated = admin_server.validate_request_payload(payload)
+        self.assertEqual(validated["requiredResources"], [])
+        self.assertEqual(validated["requestedQuantity"], 0)
+        self.assertEqual(validated["itemName"], "Relief supplies")
+        self.assertFalse(validated["isCritical"])
+
+    def test_rejects_invalid_requested_quantity_and_critical_flag(self):
+        payload = self.base_payload()
+        for quantity in (-1, 2.5, True, "3"):
+            with self.subTest(quantity=quantity):
+                with self.assertRaises(admin_server.ApiError):
+                    admin_server.validate_request_payload({**payload, "requestedQuantity": quantity})
+        with self.assertRaises(admin_server.ApiError):
+            admin_server.validate_request_payload({**payload, "isCritical": "yes"})
 
     def test_boundary_coordinates_accepted(self):
         payload = self.base_payload()
@@ -877,6 +1073,30 @@ class StoreUnitTests(unittest.TestCase):
 
     def test_schema_is_idempotent(self):
         admin_server.Store(self.store.path)  # re-opening must not error
+
+    def test_existing_request_database_is_migrated(self):
+        legacy_path = Path(self.tmp.name) / "legacy.sqlite3"
+        with sqlite3.connect(legacy_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE requests (
+                    id TEXT PRIMARY KEY, type TEXT NOT NULL, severity TEXT NOT NULL,
+                    affected_people INTEGER NOT NULL, required_resources TEXT NOT NULL,
+                    location_name TEXT NOT NULL, latitude REAL NOT NULL, longitude REAL NOT NULL,
+                    status TEXT NOT NULL, submitted_at TEXT NOT NULL, decided_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """INSERT INTO requests VALUES
+                   ('REQ-OLD0001', 'FLOOD', 'CRITICAL', 2, '[]', 'Old place',
+                    1, 2, 'pending', '2026-01-01T00:00:00Z', NULL)"""
+            )
+        migrated = admin_server.Store(legacy_path).get_request("REQ-OLD0001")
+        self.assertEqual(migrated["requestedQuantity"], 0)
+        self.assertEqual(migrated["allocatedQuantity"], 0)
+        self.assertTrue(migrated["isCritical"])
+        self.assertEqual(migrated["itemName"], "Relief supplies")
 
     def test_password_roundtrip_and_reset(self):
         self.assertFalse(self.store.has_password())

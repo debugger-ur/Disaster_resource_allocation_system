@@ -72,7 +72,7 @@ DISASTER_TYPES = {
 }
 SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
 RESOURCE_CATEGORIES = {"Ambulance", "RescueTeam", "MedicalTeam", "Equipment", "Supply"}
-STATUSES = ("pending", "accepted", "rejected")
+STATUSES = ("pending", "accepted", "partially_approved", "rejected")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS admin_credentials (
@@ -90,6 +90,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at  TEXT NOT NULL
 );
 
+-- The web service has no password-based end-user accounts. Each submitter gets
+-- an opaque notification token; only its SHA-256 hash is stored here.
+CREATE TABLE IF NOT EXISTS users (
+    id                       TEXT PRIMARY KEY,
+    notification_token_hash  TEXT NOT NULL UNIQUE,
+    created_at               TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS requests (
     id                 TEXT    PRIMARY KEY,
     type               TEXT    NOT NULL,
@@ -101,7 +109,28 @@ CREATE TABLE IF NOT EXISTS requests (
     longitude          REAL    NOT NULL,
     status             TEXT    NOT NULL DEFAULT 'pending',
     submitted_at       TEXT    NOT NULL,
-    decided_at         TEXT
+    decided_at         TEXT,
+    item_name          TEXT    NOT NULL DEFAULT 'Relief supplies',
+    requested_quantity INTEGER NOT NULL DEFAULT 0 CHECK (requested_quantity >= 0),
+    allocated_quantity INTEGER NOT NULL DEFAULT 0 CHECK (allocated_quantity >= 0),
+    is_critical        INTEGER NOT NULL DEFAULT 0,
+    decision_reason    TEXT,
+    user_id            TEXT REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS inventory_items (
+    item_name          TEXT PRIMARY KEY COLLATE NOCASE,
+    available_quantity INTEGER NOT NULL CHECK (available_quantity >= 0),
+    updated_at         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT REFERENCES users(id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+    message    TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'UNREAD' CHECK (status IN ('UNREAD', 'READ')),
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS login_attempts (
@@ -110,6 +139,7 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_login_ip_time ON login_attempts(ip, attempted_at);
 """
 
@@ -148,6 +178,30 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add the new allocation/owner fields to databases created by older releases."""
+        additions = {
+            "item_name": "TEXT NOT NULL DEFAULT 'Relief supplies'",
+            "requested_quantity": "INTEGER NOT NULL DEFAULT 0",
+            "allocated_quantity": "INTEGER NOT NULL DEFAULT 0",
+            "is_critical": "INTEGER NOT NULL DEFAULT 0",
+            "decision_reason": "TEXT",
+            "user_id": "TEXT REFERENCES users(id)",
+        }
+        with self._connect() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(requests)")}
+            was_critical_added = "is_critical" not in columns
+            for name, declaration in additions.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {declaration}")
+            if was_critical_added:
+                # Older submissions already express urgency through severity.
+                conn.execute(
+                    "UPDATE requests SET is_critical = (UPPER(severity) = 'CRITICAL')"
+                )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_user_id ON requests(user_id)")
 
     @contextmanager
     def _connect(self):
@@ -265,18 +319,45 @@ class Store:
         with self._connect() as conn:
             conn.execute("DELETE FROM login_attempts WHERE ip = ?", (ip,))
 
-    # ---- requests ----
+    # ---- requests, inventory and notifications ----
 
     def create_request(self, data: dict) -> dict:
+        """Backward-compatible helper for tests/imports that only need the row."""
+        request, _ = self.create_request_with_notification_token(data)
+        return request
+
+    def create_request_with_notification_token(
+        self, data: dict, notification_token: str | None = None
+    ) -> tuple[dict, str]:
+        """Create a request and bind it to an anonymous, token-scoped user profile."""
         request_id = f"REQ-{secrets.token_hex(4).upper()}"
         submitted = iso(utc_now())
         with self._connect() as conn:
+            user = None
+            if notification_token:
+                user = conn.execute(
+                    "SELECT id FROM users WHERE notification_token_hash = ?",
+                    (self._hash(notification_token),),
+                ).fetchone()
+            if user is not None:
+                user_id = user["id"]
+            else:
+                # A stale browser token (for example after restoring a DB backup)
+                # should not prevent a new request; issue a fresh profile token.
+                notification_token = secrets.token_urlsafe(32)
+                user_id = f"USR-{secrets.token_hex(8).upper()}"
+                conn.execute(
+                    "INSERT INTO users (id, notification_token_hash, created_at) VALUES (?, ?, ?)",
+                    (user_id, self._hash(notification_token), submitted),
+                )
+
             conn.execute(
                 """
                 INSERT INTO requests (
                     id, type, severity, affected_people, required_resources,
-                    location_name, latitude, longitude, status, submitted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    location_name, latitude, longitude, status, submitted_at,
+                    item_name, requested_quantity, allocated_quantity, is_critical, user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, 0, ?, ?)
                 """,
                 (
                     request_id,
@@ -288,9 +369,16 @@ class Store:
                     data["latitude"],
                     data["longitude"],
                     submitted,
+                    data["itemName"],
+                    data["requestedQuantity"],
+                    int(data["isCritical"]),
+                    user_id,
                 ),
             )
-        return self.get_request(request_id)  # type: ignore[return-value]
+        request = self.get_request(request_id)
+        if request is None:  # pragma: no cover - defensive
+            raise ApiError("That request could not be saved.", HTTPStatus.INTERNAL_SERVER_ERROR)
+        return request, notification_token
 
     def get_request(self, request_id: str) -> dict | None:
         with self._connect() as conn:
@@ -304,27 +392,189 @@ class Store:
             ).fetchall()
         return [self._to_dict(row) for row in rows]
 
-    def set_request_status(self, request_id: str, status: str) -> dict:
+    def list_inventory(self) -> list[dict]:
         with self._connect() as conn:
-            row = conn.execute("SELECT status FROM requests WHERE id = ?", (request_id,)).fetchone()
+            rows = conn.execute(
+                "SELECT item_name, available_quantity, updated_at FROM inventory_items "
+                "ORDER BY item_name COLLATE NOCASE"
+            ).fetchall()
+        return [
+            {
+                "itemName": row["item_name"],
+                "availableQuantity": int(row["available_quantity"]),
+                "updatedAt": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def set_inventory_quantity(self, item_name: str, available_quantity: int) -> dict:
+        item_name = item_name.strip() if isinstance(item_name, str) else ""
+        if not item_name or len(item_name) > 100:
+            raise ApiError("Resource item name is required (max 100 characters).")
+        if (
+            isinstance(available_quantity, bool)
+            or not isinstance(available_quantity, int)
+            or available_quantity < 0
+            or available_quantity > 1_000_000_000
+        ):
+            raise ApiError("Available quantity must be a whole number from 0 to 1,000,000,000.")
+        now = iso(utc_now())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO inventory_items (item_name, available_quantity, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(item_name) DO UPDATE SET
+                    available_quantity = excluded.available_quantity,
+                    updated_at = excluded.updated_at
+                """,
+                (item_name, available_quantity, now),
+            )
+            row = conn.execute(
+                "SELECT item_name, available_quantity, updated_at FROM inventory_items "
+                "WHERE item_name = ? COLLATE NOCASE",
+                (item_name,),
+            ).fetchone()
+        return {
+            "itemName": row["item_name"],
+            "availableQuantity": int(row["available_quantity"]),
+            "updatedAt": row["updated_at"],
+        }
+
+    def get_notification_user_id(self, notification_token: str) -> str | None:
+        if not notification_token:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM users WHERE notification_token_hash = ?",
+                (self._hash(notification_token),),
+            ).fetchone()
+        return row["id"] if row else None
+
+    def list_notifications(self, user_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, user_id, request_id, message, status, created_at
+                FROM notifications WHERE user_id = ?
+                ORDER BY created_at DESC, id DESC LIMIT 500
+                """,
+                (user_id,),
+            ).fetchall()
+        return [self._notification_to_dict(row) for row in rows]
+
+    def mark_notification_read(self, notification_id: int, user_id: str) -> dict:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE notifications SET status = 'READ' WHERE id = ? AND user_id = ?",
+                (notification_id, user_id),
+            )
+            if cursor.rowcount == 0:
+                raise ApiError("That notification was not found.", HTTPStatus.NOT_FOUND)
+            row = conn.execute(
+                """
+                SELECT id, user_id, request_id, message, status, created_at
+                FROM notifications WHERE id = ? AND user_id = ?
+                """,
+                (notification_id, user_id),
+            ).fetchone()
+        return self._notification_to_dict(row)
+
+    def process_request(self, request_id: str, requested_status: str, reason: str | None = None) -> dict:
+        """Atomically decide, allocate stock, and save the user's notification."""
+        now = iso(utc_now())
+        with self._connect() as conn:
+            # Serialize stock checks so concurrent admin decisions cannot overspend.
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone()
             if row is None:
                 raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
             if row["status"] != "pending":
                 raise ApiError(
                     f"Request {request_id} was already {row['status']}.", HTTPStatus.CONFLICT
                 )
+
+            requested = int(row["requested_quantity"])
+            allocated = 0
+            final_status = "rejected"
+            decision_reason = None
+
+            if requested_status == "rejected":
+                decision_reason = reason or "Not prioritized at this time."
+            elif requested_status == "accepted":
+                stock = conn.execute(
+                    "SELECT available_quantity FROM inventory_items WHERE item_name = ? COLLATE NOCASE",
+                    (row["item_name"],),
+                ).fetchone()
+                available = int(stock["available_quantity"]) if stock else 0
+
+                # A quantity of zero means an older, unquantified request. Keep its
+                # historical accept flow working, without inventing stock usage.
+                if requested == 0 or requested <= available:
+                    final_status = "accepted"
+                    allocated = requested
+                    if requested > 0:
+                        conn.execute(
+                            "UPDATE inventory_items SET available_quantity = ?, updated_at = ? "
+                            "WHERE item_name = ? COLLATE NOCASE",
+                            (available - requested, now, row["item_name"]),
+                        )
+                elif bool(row["is_critical"]) and available > 0:
+                    final_status = "partially_approved"
+                    allocated = available
+                    conn.execute(
+                        "UPDATE inventory_items SET available_quantity = 0, updated_at = ? "
+                        "WHERE item_name = ? COLLATE NOCASE",
+                        (now, row["item_name"]),
+                    )
+                else:
+                    decision_reason = (
+                        "Insufficient stock; this request was not marked critical and was not prioritized at this time."
+                        if not bool(row["is_critical"])
+                        else "Insufficient stock; none is currently available."
+                    )
+            else:  # pragma: no cover - guarded by the HTTP route
+                raise ApiError("Status must be 'accepted' or 'rejected'.")
+
             conn.execute(
-                "UPDATE requests SET status = ?, decided_at = ? WHERE id = ?",
-                (status, iso(utc_now()), request_id),
+                """
+                UPDATE requests
+                SET status = ?, allocated_quantity = ?, decision_reason = ?, decided_at = ?
+                WHERE id = ?
+                """,
+                (final_status, allocated, decision_reason, now, request_id),
             )
-        updated = self.get_request(request_id)
-        if updated is None:  # pragma: no cover - defensive
-            raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
-        return updated
+            updated_row = conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone()
+            updated_request = self._to_dict(updated_row)
+            message = build_request_notification_message(updated_request, final_status, decision_reason)
+            cursor = conn.execute(
+                """
+                INSERT INTO notifications (user_id, request_id, message, status, created_at)
+                VALUES (?, ?, ?, 'UNREAD', ?)
+                """,
+                (row["user_id"], request_id, message, now),
+            )
+            notification_row = conn.execute(
+                """
+                SELECT id, user_id, request_id, message, status, created_at
+                FROM notifications WHERE id = ?
+                """,
+                (cursor.lastrowid,),
+            ).fetchone()
+
+        return {
+            "request": updated_request,
+            "message_to_user": message,
+            "notification": self._notification_to_dict(notification_row),
+        }
+
+    def set_request_status(self, request_id: str, status: str) -> dict:
+        """Compatibility wrapper; new callers should use process_request()."""
+        return self.process_request(request_id, status)["request"]
 
     @staticmethod
     def _to_dict(row: sqlite3.Row) -> dict:
-        """Maps snake_case columns onto the camelCase shape docs/js expects."""
+        """Maps SQLite columns onto the camelCase shape docs/js expects."""
         try:
             resources = json.loads(row["required_resources"])
         except (TypeError, json.JSONDecodeError):
@@ -341,7 +591,47 @@ class Store:
             "status": row["status"],
             "submittedAt": row["submitted_at"],
             "decidedAt": row["decided_at"],
+            "itemName": row["item_name"],
+            "requestedQuantity": int(row["requested_quantity"]),
+            "allocatedQuantity": int(row["allocated_quantity"]),
+            "isCritical": bool(row["is_critical"]),
+            "decisionReason": row["decision_reason"],
         }
+
+    @staticmethod
+    def _notification_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": int(row["id"]),
+            "userId": row["user_id"],
+            "requestId": row["request_id"],
+            "message": row["message"],
+            "status": row["status"],
+            "createdAt": row["created_at"],
+        }
+
+
+def build_request_notification_message(request: dict, status: str, reason: str | None = None) -> str:
+    """Single source for user-facing decision text, used by every admin decision."""
+    request_id = request["id"]
+    requested = int(request["requestedQuantity"])
+    allocated = int(request["allocatedQuantity"])
+    item_name = request["itemName"]
+
+    if status == "accepted":
+        return (
+            f"Your request #{request_id} for {requested} {item_name} has been approved. "
+            "You will receive the full requested quantity."
+        )
+    if status == "partially_approved":
+        return (
+            f"Your request #{request_id} for {requested} {item_name} has been partially approved. "
+            f"It is critical, but only {allocated} units are currently in stock. "
+            f"We are providing {allocated} units now. The remaining amount will be provided later "
+            "if more supplies arrive."
+        )
+    why = (reason or "Insufficient stock / not prioritized at this time").strip()
+    ending = "" if why.endswith((".", "!", "?")) else "."
+    return f"Your request #{request_id} for {requested} {item_name} has been rejected. Reason: {why}{ending}"
 
 
 def validate_request_payload(raw: object) -> dict:
@@ -393,6 +683,31 @@ def validate_request_payload(raw: object) -> dict:
         if value not in resources:
             resources.append(value)
 
+    raw_item_name = field("itemName")
+    if raw_item_name is None:
+        raw_item_name = resources[0] if resources else "Relief supplies"
+    if not isinstance(raw_item_name, str):
+        raise ApiError("Resource item name must be text.")
+    item_name = raw_item_name.strip()
+    if not item_name:
+        raise ApiError("Resource item name is required.")
+    if len(item_name) > 100:
+        raise ApiError("Resource item name is too long (max 100 characters).")
+
+    quantity = field("requestedQuantity")
+    if quantity is None:
+        quantity = 0  # pre-allocation API clients submitted unquantified requests
+    if isinstance(quantity, bool) or not isinstance(quantity, int):
+        raise ApiError("Requested quantity must be a whole number.")
+    if quantity < 0 or quantity > 1_000_000_000:
+        raise ApiError("Requested quantity must be between 0 and 1,000,000,000.")
+
+    is_critical = field("isCritical")
+    if is_critical is None:
+        is_critical = severity == "CRITICAL"
+    elif not isinstance(is_critical, bool):
+        raise ApiError("isCritical must be a boolean.")
+
     return {
         "type": disaster_type,
         "severity": severity,
@@ -401,6 +716,9 @@ def validate_request_payload(raw: object) -> dict:
         "locationName": html.escape(location, quote=False),
         "latitude": float(latitude),
         "longitude": float(longitude),
+        "itemName": item_name,
+        "requestedQuantity": quantity,
+        "isCritical": is_critical,
     }
 
 
@@ -519,6 +837,16 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         self.auth_source = source
         return session
 
+    def _require_notification_user(self) -> str:
+        token = self.headers.get("X-Notification-Token", "").strip()
+        user_id = self.store.get_notification_user_id(token)
+        if user_id is None:
+            raise ApiError(
+                "A valid notification token is required. Submit a request in this browser first.",
+                HTTPStatus.UNAUTHORIZED,
+            )
+        return user_id
+
     def _require_csrf(self) -> None:
         # A cross-site form cannot set custom headers, and the bearer token is not
         # attached automatically by the browser, so CSRF is already guaranteed.
@@ -608,6 +936,10 @@ class DrrasHandler(SimpleHTTPRequestHandler):
             if path == "/api/health":
                 self._send_json({"status": "ok", "passwordConfigured": self.store.has_password()})
                 return
+            if path == "/api/notifications":
+                user_id = self._require_notification_user()
+                self._send_json({"notifications": self.store.list_notifications(user_id)})
+                return
             if path == "/api/admin/session":
                 session = self._require_admin()
                 payload = {"authenticated": True, "csrfToken": session["csrf_token"]}
@@ -619,7 +951,11 @@ class DrrasHandler(SimpleHTTPRequestHandler):
                 self._require_admin()
                 self._send_json({"requests": self.store.list_requests()})
                 return
-                        if path.startswith("/api/admin/requests/"):
+            if path == "/api/admin/inventory":
+                self._require_admin()
+                self._send_json({"inventory": self.store.list_inventory()})
+                return
+            if path.startswith("/api/admin/requests/"):
                 self._require_admin()
                 request_id = unquote(path.rsplit("/", 1)[-1])
                 record = self.store.get_request(request_id)
@@ -627,7 +963,7 @@ class DrrasHandler(SimpleHTTPRequestHandler):
                     raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
                 self._send_json({"request": record})
                 return
-            # Public endpoint: users can check their own request status by ID
+            # Public status lookup remains available by request ID for compatibility.
             if path.startswith("/api/requests/"):
                 request_id = unquote(path.rsplit("/", 1)[-1])
                 record = self.store.get_request(request_id)
@@ -645,7 +981,36 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         try:
             if path == "/api/requests":
                 payload = validate_request_payload(self._read_json())
-                self._send_json({"request": self.store.create_request(payload)}, HTTPStatus.CREATED)
+                request_record, notification_token = self.store.create_request_with_notification_token(
+                    payload, self.headers.get("X-Notification-Token", "").strip() or None
+                )
+                self._send_json(
+                    {"request": request_record, "notificationToken": notification_token},
+                    HTTPStatus.CREATED,
+                )
+                return
+            if path == "/api/admin/inventory":
+                self._require_admin()
+                self._require_csrf()
+                body = self._read_json()
+                if not isinstance(body, dict):
+                    raise ApiError("Expected a JSON object.")
+                raw_item_name = body.get("itemName")
+                if not isinstance(raw_item_name, str):
+                    raise ApiError("Resource item name is required (max 100 characters).")
+                item_name = raw_item_name.strip()
+                if not item_name or len(item_name) > 100:
+                    raise ApiError("Resource item name is required (max 100 characters).")
+                quantity = body.get("availableQuantity")
+                if (
+                    isinstance(quantity, bool)
+                    or not isinstance(quantity, int)
+                    or quantity < 0
+                    or quantity > 1_000_000_000
+                ):
+                    raise ApiError("Available quantity must be a whole number from 0 to 1,000,000,000.")
+                item = self.store.set_inventory_quantity(item_name, quantity)
+                self._send_json({"item": item})
                 return
             if path == "/api/admin/login":
                 self._handle_login()
@@ -698,6 +1063,20 @@ class DrrasHandler(SimpleHTTPRequestHandler):
 
     def _route_patch(self, path: str) -> None:
         try:
+            if path.startswith("/api/notifications/"):
+                user_id = self._require_notification_user()
+                body = self._read_json()
+                if not isinstance(body, dict) or str(body.get("status") or "").upper() != "READ":
+                    raise ApiError("Notification status must be 'READ'.")
+                raw_id = unquote(path.rsplit("/", 1)[-1])
+                try:
+                    notification_id = int(raw_id)
+                except ValueError:
+                    raise ApiError("That notification was not found.", HTTPStatus.NOT_FOUND) from None
+                notification = self.store.mark_notification_read(notification_id, user_id)
+                self._send_json({"notification": notification})
+                return
+
             self._require_admin()
             self._require_csrf()
             if not path.startswith("/api/admin/requests/"):
@@ -709,7 +1088,21 @@ class DrrasHandler(SimpleHTTPRequestHandler):
             status = str(body.get("status") or "").strip().lower()
             if status not in ("accepted", "rejected"):
                 raise ApiError("Status must be 'accepted' or 'rejected'.")
-            self._send_json({"request": self.store.set_request_status(request_id, status)})
+            reason_value = body.get("reason")
+            if reason_value is not None and not isinstance(reason_value, str):
+                raise ApiError("Reason must be text.")
+            reason = (reason_value or "").strip() or None
+            if reason and len(reason) > 500:
+                raise ApiError("Reason is too long (max 500 characters).")
+
+            result = self.store.process_request(request_id, status, reason)
+            self._send_json(
+                {
+                    "request": result["request"],
+                    "message_to_user": result["message_to_user"],
+                    "notification": result["notification"],
+                }
+            )
         except ApiError as err:
             self._send_json({"error": err.message}, err.status)
 
