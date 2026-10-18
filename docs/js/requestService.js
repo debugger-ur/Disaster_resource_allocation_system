@@ -24,15 +24,31 @@ export const config = {
 };
 
 const DEMO_REQUESTS_KEY = "drras_requests";
-const DEMO_NOTIFICATIONS_KEY = "drras_notifications";
-const DEMO_INVENTORY_KEY = "drras_inventory";
 const DEMO_SESSION_KEY = "drras_demo_admin";
-const NOTIFICATION_TOKEN_KEY = "drras_notification_token";
+const DEMO_INVENTORY_KEY = "drras_inventory";
 const PROBE_TIMEOUT_MS = 2000;
 
 const DISASTER_TYPES = ["FLOOD", "EARTHQUAKE", "FIRE", "LANDSLIDE", "INDUSTRIAL_ACCIDENT", "OTHER"];
 const SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 const RESOURCE_CATEGORIES = ["Ambulance", "RescueTeam", "MedicalTeam", "Equipment", "Supply"];
+const MAX_RESOURCE_QUANTITY = 1_000_000_000;
+const MESSAGE_MAX_LENGTH = 1000;
+
+// Mirrors DEFAULT_INVENTORY / the default decision messages in backend/admin_server.py.
+const DEFAULT_INVENTORY = {
+  Ambulance: 3,
+  RescueTeam: 18,
+  MedicalTeam: 5,
+  Equipment: 2,
+  Supply: 1500,
+};
+const DEFAULT_DECISION_MESSAGES = {
+  accepted:
+    "Your relief request has been ACCEPTED by the command center. Relief units are being dispatched to your location. Please stay in a safe, accessible area and keep your communication line open.",
+  rejected:
+    "Your relief request has been reviewed and REJECTED by the command center. This typically happens when the zone is already covered by ongoing operations or the request was merged with a duplicate. If you are in immediate danger, please contact local emergency services (112).",
+};
+export { DEFAULT_DECISION_MESSAGES };
 
 export class ServiceError extends Error {
   constructor(message, status = 0) {
@@ -86,49 +102,24 @@ function writeDemoRequests(rows) {
   }
 }
 
-function readStoredArray(key) {
+// Demo-mode stock of supplies. Seeded from the same defaults the server uses.
+function readDemoInventory() {
   try {
-    const raw = storage().getItem(key);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
+    const raw = storage().getItem(DEMO_INVENTORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed === "object") return { ...DEFAULT_INVENTORY, ...parsed };
   } catch {
-    return [];
+    /* fall through to defaults */
   }
+  return { ...DEFAULT_INVENTORY };
 }
 
-function writeStoredArray(key, rows) {
+function writeDemoInventory(inventory) {
   try {
-    storage().setItem(key, JSON.stringify(rows));
+    storage().setItem(DEMO_INVENTORY_KEY, JSON.stringify(inventory));
   } catch (err) {
-    throw new ServiceError(`This browser could not save data (${err?.name || "error"}).`, 500);
+    throw new ServiceError(`This browser could not save the inventory (${err?.name || "error"}).`, 500);
   }
-}
-
-function getNotificationToken() {
-  try {
-    return storage().getItem(NOTIFICATION_TOKEN_KEY) || null;
-  } catch {
-    return null;
-  }
-}
-
-function saveNotificationToken(token) {
-  if (!token) return;
-  try {
-    storage().setItem(NOTIFICATION_TOKEN_KEY, token);
-  } catch {
-    // The request is still saved; the user can see its notification token in the
-    // response only on a non-browser API client if storage is unavailable.
-  }
-}
-
-function ensureDemoNotificationToken() {
-  let token = getNotificationToken();
-  if (!token) {
-    token = `demo-${newRequestId()}-${newRequestId()}`;
-    saveNotificationToken(token);
-  }
-  return token;
 }
 
 function newRequestId() {
@@ -173,20 +164,88 @@ export function validateRequestPayload(raw) {
     if (!requiredResources.includes(value)) requiredResources.push(value);
   }
 
-  const itemName = String(raw.itemName ?? requiredResources[0] ?? "Relief supplies").trim();
-  if (!itemName) throw new ServiceError("Resource item name is required.");
-  if (itemName.length > 100) throw new ServiceError("Resource item name is too long (max 100 characters).");
-  const requestedQuantity = raw.requestedQuantity == null ? 0 : Number(raw.requestedQuantity);
-  if (!Number.isInteger(requestedQuantity) || requestedQuantity < 0 || requestedQuantity > 1_000_000_000) {
-    throw new ServiceError("Requested quantity must be a whole number between 0 and 1,000,000,000.");
+  // Quantities are optional (the form used to send categories only). A category
+  // with a quantity always lands in requiredResources as well.
+  const quantitiesRaw = raw.resourceQuantities ?? {};
+  if (typeof quantitiesRaw !== "object" || Array.isArray(quantitiesRaw)) {
+    throw new ServiceError("Resource quantities must be an object of category: amount pairs.");
   }
-  const isCritical = raw.isCritical == null ? severity === "CRITICAL" : raw.isCritical;
-  if (typeof isCritical !== "boolean") throw new ServiceError("isCritical must be a boolean.");
+  const resourceQuantities = {};
+  for (const [category, amount] of Object.entries(quantitiesRaw)) {
+    const name = String(category).trim();
+    if (!RESOURCE_CATEGORIES.includes(name)) throw new ServiceError(`Unknown resource category: ${name}`);
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value < 0 || value > MAX_RESOURCE_QUANTITY) {
+      throw new ServiceError(`Quantity for ${name} must be a number between 0 and ${MAX_RESOURCE_QUANTITY}.`);
+    }
+    const quantity = Math.trunc(value);
+    if (quantity === 0) continue;
+    resourceQuantities[name] = quantity;
+    if (!requiredResources.includes(name)) requiredResources.push(name);
+  }
 
   return {
-    type, severity, affectedPeople: Math.trunc(affected), requiredResources,
-    locationName, latitude, longitude, itemName, requestedQuantity, isCritical,
+    type,
+    severity,
+    affectedPeople: Math.trunc(affected),
+    requiredResources,
+    resourceQuantities,
+    locationName,
+    latitude,
+    longitude,
   };
+}
+
+/** Mirrors plan_submission_grant() in backend/admin_server.py: what the user is
+ *  promised the moment they ask, given the supplies on hand right now. */
+export function planSubmissionGrant(requested, available, severity) {
+  const entries = Object.entries(requested || {});
+  if (entries.length === 0) return { granted: {}, message: null };
+  const short = entries.filter(([category, quantity]) => quantity > (available[category] || 0));
+  if (short.length === 0) return { granted: { ...requested }, message: null };
+  if (severity === "CRITICAL") {
+    const granted = {};
+    for (const [category, quantity] of entries) {
+      const amount = Math.min(quantity, available[category] || 0);
+      if (amount > 0) granted[category] = amount;
+    }
+    const detail = short
+      .map(([category, quantity]) => `${granted[category] || 0} of ${quantity} ${category} (in stock now: ${available[category] || 0})`)
+      .join("; ");
+    return {
+      granted,
+      message:
+        `Critical situation: the supplies you asked for are beyond the limits of what is in stock right now. ` +
+        `You are guaranteed at least the supplies present at this moment: ${detail}. ` +
+        `In other words, this much only can be provided at the moment; the rest will be dispatched when supplies are replenished.`,
+    };
+  }
+  const detail = short
+    .map(([category, quantity]) => `${category}: asked ${quantity}, in stock ${available[category] || 0}`)
+    .join("; ");
+  return {
+    granted: {},
+    message:
+      `The supplies you asked for are beyond the limits of what is in stock right now (${detail}). ` +
+      `Your request has been flagged for admin review; an admin will decide what can be provided at the moment.`,
+  };
+}
+
+function escapeText(value) {
+  return String(value).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+}
+
+/** Mirrors validate_decision_message() in backend/admin_server.py: trims and
+ *  length-checks the admin note. The server escapes HTML on store; the demo
+ *  path calls escapeText() itself so both modes persist the same shape. */
+export function sanitizeDecisionMessage(raw) {
+  if (raw === undefined || raw === null) return null;
+  const text = String(raw).trim();
+  if (!text) return null;
+  if (text.length > MESSAGE_MAX_LENGTH) {
+    throw new ServiceError(`Message is too long (max ${MESSAGE_MAX_LENGTH} characters).`);
+  }
+  return text;
 }
 
 // ---- mode detection ----
@@ -238,7 +297,6 @@ async function request(method, path, body, options = {}) {
   }
   if (options.csrf) init.headers["X-CSRF-Token"] = options.csrf;
   if (options.token) init.headers.Authorization = `Bearer ${options.token}`;
-  if (options.notificationToken) init.headers["X-Notification-Token"] = options.notificationToken;
 
   let response;
   try {
@@ -269,19 +327,22 @@ export async function submitRequest(payload) {
     throw new ServiceError("The request service is not reachable, and demo fallback is disabled.", 503);
   }
   if (mode === "server") {
-    const result = await request("POST", "/api/requests", payload, {
-      notificationToken: getNotificationToken(),
-    });
-    saveNotificationToken(result.notificationToken);
+    const result = await request("POST", "/api/requests", payload);
     return { request: result.request, mode };
   }
   const record = validateRequestPayload(payload);
-  ensureDemoNotificationToken();
+  const { granted, message } = planSubmissionGrant(
+    record.resourceQuantities,
+    readDemoInventory(),
+    record.severity,
+  );
   const row = {
     ...record,
+    grantedResources: granted,
+    userMessage: message,
+    decisionMessage: null,
     id: newRequestId(),
     status: "pending",
-    allocatedQuantity: 0,
     submittedAt: new Date().toISOString(),
     decidedAt: null,
   };
@@ -334,187 +395,97 @@ export async function sessionState() {
   return { authenticated: true, csrfToken: result.csrfToken || null, mode, demo: false, sessionToken: result.sessionToken };
 }
 
-function requireDemoAdmin() {
-  try {
-    if (session().getItem(DEMO_SESSION_KEY) !== "1") {
-      throw new ServiceError("Your admin session has expired. Sign in again.", 401);
-    }
-  } catch (err) {
-    if (err instanceof ServiceError) throw err;
-    throw new ServiceError("Your admin session has expired. Sign in again.", 401);
-  }
-}
-
 export async function listRequests() {
   const mode = await detectMode();
   if (mode === "demo") {
-    requireDemoAdmin();
+    try {
+      if (session().getItem(DEMO_SESSION_KEY) !== "1") throw new ServiceError("Your admin session has expired. Sign in again.", 401);
+    } catch (err) {
+      if (err instanceof ServiceError) throw err;
+      throw new ServiceError("Your admin session has expired. Sign in again.", 401);
+    }
     return { requests: readDemoRequests(), mode, demo: true };
   }
   const result = await request("GET", "/api/admin/requests", undefined, { token: bearerToken() });
   return { requests: Array.isArray(result.requests) ? result.requests : [], mode, demo: false };
 }
 
-export async function listInventory() {
+export async function decideRequest(id, status, csrf, message = null) {
   const mode = await detectMode();
+  const cleanMessage = sanitizeDecisionMessage(message);
   if (mode === "demo") {
-    requireDemoAdmin();
-    return { inventory: readStoredArray(DEMO_INVENTORY_KEY), mode, demo: true };
-  }
-  const result = await request("GET", "/api/admin/inventory", undefined, { token: bearerToken() });
-  return { inventory: Array.isArray(result.inventory) ? result.inventory : [], mode, demo: false };
-}
-
-export async function setInventoryQuantity(itemName, availableQuantity, csrf) {
-  const cleanedName = String(itemName ?? "").trim();
-  const quantity = Number(availableQuantity);
-  if (!cleanedName || cleanedName.length > 100) throw new ServiceError("Enter a resource item name (max 100 characters).");
-  if (!Number.isInteger(quantity) || quantity < 0 || quantity > 1_000_000_000) {
-    throw new ServiceError("Available quantity must be a whole number from 0 to 1,000,000,000.");
-  }
-
-  const mode = await detectMode();
-  if (mode === "demo") {
-    requireDemoAdmin();
-    const inventory = readStoredArray(DEMO_INVENTORY_KEY);
-    const index = inventory.findIndex((item) => item.itemName.toLowerCase() === cleanedName.toLowerCase());
-    const item = { itemName: cleanedName, availableQuantity: quantity, updatedAt: new Date().toISOString() };
-    if (index < 0) inventory.push(item);
-    else inventory[index] = item;
-    writeStoredArray(DEMO_INVENTORY_KEY, inventory);
-    return { item, mode, demo: true };
-  }
-  const result = await request("POST", "/api/admin/inventory", {
-    itemName: cleanedName,
-    availableQuantity: quantity,
-  }, { csrf, token: bearerToken() });
-  return { item: result.item, mode, demo: false };
-}
-
-function decisionMessage(request, status, reason) {
-  const requested = Number(request.requestedQuantity || 0);
-  const allocated = Number(request.allocatedQuantity || 0);
-  const item = request.itemName || request.requiredResources?.[0] || "Relief supplies";
-  if (status === "accepted") {
-    return `Your request #${request.id} for ${requested} ${item} has been approved. You will receive the full requested quantity.`;
-  }
-  if (status === "partially_approved") {
-    return `Your request #${request.id} for ${requested} ${item} has been partially approved. It is critical, but only ${allocated} units are currently in stock. We are providing ${allocated} units now. The remaining amount will be provided later if more supplies arrive.`;
-  }
-  const why = String(reason || "Insufficient stock / not prioritized at this time").trim();
-  const ending = /[.!?]$/.test(why) ? "" : ".";
-  return `Your request #${request.id} for ${requested} ${item} has been rejected. Reason: ${why}${ending}`;
-}
-
-function decideDemoRequest(request, requestedStatus, reason) {
-  const quantity = Number(request.requestedQuantity || 0);
-  const inventory = readStoredArray(DEMO_INVENTORY_KEY);
-  const stockIndex = inventory.findIndex(
-    (item) => item.itemName.toLowerCase() === String(request.itemName || "").toLowerCase(),
-  );
-  const available = stockIndex < 0 ? 0 : Number(inventory[stockIndex].availableQuantity || 0);
-  let status = "rejected";
-  let allocatedQuantity = 0;
-  let decisionReason = null;
-
-  if (requestedStatus === "rejected") {
-    decisionReason = reason || "Not prioritized at this time.";
-  } else if (quantity === 0 || quantity <= available) {
-    status = "accepted";
-    allocatedQuantity = quantity;
-    if (quantity > 0 && stockIndex >= 0) {
-      inventory[stockIndex] = { ...inventory[stockIndex], availableQuantity: available - quantity, updatedAt: new Date().toISOString() };
-      writeStoredArray(DEMO_INVENTORY_KEY, inventory);
-    }
-  } else if (request.isCritical && available > 0) {
-    status = "partially_approved";
-    allocatedQuantity = available;
-    inventory[stockIndex] = { ...inventory[stockIndex], availableQuantity: 0, updatedAt: new Date().toISOString() };
-    writeStoredArray(DEMO_INVENTORY_KEY, inventory);
-  } else {
-    decisionReason = request.isCritical
-      ? "Insufficient stock; none is currently available."
-      : "Insufficient stock; this request was not marked critical and was not prioritized at this time.";
-  }
-
-  const updated = {
-    ...request,
-    status,
-    allocatedQuantity,
-    decisionReason,
-    decidedAt: new Date().toISOString(),
-  };
-  return { request: updated, messageToUser: decisionMessage(updated, status, decisionReason) };
-}
-
-export async function decideRequest(id, status, csrf, reason = null) {
-  const mode = await detectMode();
-  if (mode === "demo") {
-    requireDemoAdmin();
     const rows = readDemoRequests();
     const index = rows.findIndex((row) => row.id === id);
     if (index === -1) throw new ServiceError("That request no longer exists.", 404);
     if (rows[index].status !== "pending") {
       throw new ServiceError(`Request ${id} was already ${rows[index].status}.`, 409);
     }
-    const decision = decideDemoRequest(rows[index], status, reason);
-    rows[index] = decision.request;
-    writeDemoRequests(rows);
-    const notification = {
-      id: newRequestId(),
-      requestId: id,
-      message: decision.messageToUser,
-      status: "UNREAD",
-      createdAt: new Date().toISOString(),
+    const row = rows[index];
+    let decisionMessage = (cleanMessage ? escapeText(cleanMessage) : null)
+      || DEFAULT_DECISION_MESSAGES[status]
+      || DEFAULT_DECISION_MESSAGES.rejected;
+    let granted = {};
+    if (status === "accepted") {
+      const inventory = readDemoInventory();
+      const requested = row.resourceQuantities || {};
+      for (const [category, quantity] of Object.entries(requested)) {
+        const delivered = Math.min(quantity, inventory[category] || 0);
+        if (delivered > 0) {
+          granted[category] = delivered;
+          inventory[category] = (inventory[category] || 0) - delivered;
+        }
+      }
+      writeDemoInventory(inventory);
+      const short = Object.entries(requested).filter(([category, quantity]) => (granted[category] || 0) < quantity);
+      if (short.length > 0) {
+        const detail = short.map(([category, quantity]) => `${granted[category] || 0} of ${quantity} ${category}`).join("; ");
+        decisionMessage += ` Supplies note: only the stock at this moment could be provided — ${detail}; this much only can be provided at the moment. The remainder follows when supplies are replenished.`;
+      }
+    }
+    rows[index] = {
+      ...row,
+      status,
+      grantedResources: granted,
+      decisionMessage,
+      decidedAt: new Date().toISOString(),
     };
-    writeStoredArray(DEMO_NOTIFICATIONS_KEY, [notification, ...readStoredArray(DEMO_NOTIFICATIONS_KEY)]);
-    return { ...decision, mode, demo: true };
+    writeDemoRequests(rows);
+    return { request: rows[index], mode, demo: true };
   }
-  const result = await request(
-    "PATCH",
-    `/api/admin/requests/${encodeURIComponent(id)}`,
-    { status, reason },
-    { csrf, token: bearerToken() },
-  );
-  return {
-    request: result.request,
-    messageToUser: result.message_to_user,
-    notification: result.notification,
-    mode,
-    demo: false,
-  };
+  const body = cleanMessage ? { status, message: cleanMessage } : { status };
+  const result = await request("PATCH", `/api/admin/requests/${encodeURIComponent(id)}`, body, { csrf, token: bearerToken() });
+  return { request: result.request, mode, demo: false };
 }
 
-export async function listNotifications() {
-  const token = getNotificationToken();
-  if (!token) throw new ServiceError("No notification profile is linked to this browser yet. Submit a relief request first.", 401);
+/** Public status check: the user looks up their own request by ID and reads the
+ *  allocation note and the admin's decision message. */
+export async function getRequestStatus(id) {
   const mode = await detectMode();
-  if (mode === "demo") {
-    return { notifications: readStoredArray(DEMO_NOTIFICATIONS_KEY), mode, demo: true };
+  if (mode === "unavailable") {
+    throw new ServiceError("The request service is not reachable, and demo fallback is disabled.", 503);
   }
-  const result = await request("GET", "/api/notifications", undefined, { notificationToken: token });
-  return { notifications: Array.isArray(result.notifications) ? result.notifications : [], mode, demo: false };
+  const requestId = String(id || "").trim();
+  if (!requestId) throw new ServiceError("Enter your Request ID (e.g. REQ-1A2B3C4D).");
+  if (mode === "demo") {
+    const row = readDemoRequests().find((item) => item.id.toUpperCase() === requestId.toUpperCase());
+    if (!row) throw new ServiceError("That request was not found in this browser.", 404);
+    return { request: row, mode, demo: true };
+  }
+  const result = await request("GET", `/api/requests/${encodeURIComponent(requestId)}`);
+  return { request: result.request, mode, demo: false };
 }
 
-export async function markNotificationRead(id) {
-  const token = getNotificationToken();
-  if (!token) throw new ServiceError("No notification profile is linked to this browser yet. Submit a relief request first.", 401);
+/** Supplies currently on hand per category ("at this moment"). */
+export async function fetchInventory() {
   const mode = await detectMode();
-  if (mode === "demo") {
-    const notifications = readStoredArray(DEMO_NOTIFICATIONS_KEY);
-    const index = notifications.findIndex((notification) => String(notification.id) === String(id));
-    if (index < 0) throw new ServiceError("That notification was not found.", 404);
-    notifications[index] = { ...notifications[index], status: "READ" };
-    writeStoredArray(DEMO_NOTIFICATIONS_KEY, notifications);
-    return { notification: notifications[index], mode, demo: true };
+  if (mode === "demo") return { inventory: readDemoInventory(), mode, demo: true };
+  if (mode === "unavailable") return { inventory: { ...DEFAULT_INVENTORY }, mode, demo: false };
+  try {
+    const result = await request("GET", "/api/inventory");
+    return { inventory: result.inventory || {}, mode, demo: false };
+  } catch {
+    return { inventory: { ...DEFAULT_INVENTORY }, mode, demo: false };
   }
-  const result = await request(
-    "PATCH",
-    `/api/notifications/${encodeURIComponent(id)}`,
-    { status: "READ" },
-    { notificationToken: token },
-  );
-  return { notification: result.notification, mode, demo: false };
 }
 
 export async function logout(csrf) {
