@@ -24,7 +24,10 @@ export const config = {
 };
 
 const DEMO_REQUESTS_KEY = "drras_requests";
+const DEMO_NOTIFICATIONS_KEY = "drras_notifications";
+const DEMO_INVENTORY_KEY = "drras_inventory";
 const DEMO_SESSION_KEY = "drras_demo_admin";
+const NOTIFICATION_TOKEN_KEY = "drras_notification_token";
 const PROBE_TIMEOUT_MS = 2000;
 
 const DISASTER_TYPES = ["FLOOD", "EARTHQUAKE", "FIRE", "LANDSLIDE", "INDUSTRIAL_ACCIDENT", "OTHER"];
@@ -83,6 +86,51 @@ function writeDemoRequests(rows) {
   }
 }
 
+function readStoredArray(key) {
+  try {
+    const raw = storage().getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredArray(key, rows) {
+  try {
+    storage().setItem(key, JSON.stringify(rows));
+  } catch (err) {
+    throw new ServiceError(`This browser could not save data (${err?.name || "error"}).`, 500);
+  }
+}
+
+function getNotificationToken() {
+  try {
+    return storage().getItem(NOTIFICATION_TOKEN_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+function saveNotificationToken(token) {
+  if (!token) return;
+  try {
+    storage().setItem(NOTIFICATION_TOKEN_KEY, token);
+  } catch {
+    // The request is still saved; the user can see its notification token in the
+    // response only on a non-browser API client if storage is unavailable.
+  }
+}
+
+function ensureDemoNotificationToken() {
+  let token = getNotificationToken();
+  if (!token) {
+    token = `demo-${newRequestId()}-${newRequestId()}`;
+    saveNotificationToken(token);
+  }
+  return token;
+}
+
 function newRequestId() {
   const bytes = new Uint8Array(4);
   if (typeof globalThis.crypto?.getRandomValues === "function") {
@@ -125,7 +173,20 @@ export function validateRequestPayload(raw) {
     if (!requiredResources.includes(value)) requiredResources.push(value);
   }
 
-  return { type, severity, affectedPeople: Math.trunc(affected), requiredResources, locationName, latitude, longitude };
+  const itemName = String(raw.itemName ?? requiredResources[0] ?? "Relief supplies").trim();
+  if (!itemName) throw new ServiceError("Resource item name is required.");
+  if (itemName.length > 100) throw new ServiceError("Resource item name is too long (max 100 characters).");
+  const requestedQuantity = raw.requestedQuantity == null ? 0 : Number(raw.requestedQuantity);
+  if (!Number.isInteger(requestedQuantity) || requestedQuantity < 0 || requestedQuantity > 1_000_000_000) {
+    throw new ServiceError("Requested quantity must be a whole number between 0 and 1,000,000,000.");
+  }
+  const isCritical = raw.isCritical == null ? severity === "CRITICAL" : raw.isCritical;
+  if (typeof isCritical !== "boolean") throw new ServiceError("isCritical must be a boolean.");
+
+  return {
+    type, severity, affectedPeople: Math.trunc(affected), requiredResources,
+    locationName, latitude, longitude, itemName, requestedQuantity, isCritical,
+  };
 }
 
 // ---- mode detection ----
@@ -177,6 +238,7 @@ async function request(method, path, body, options = {}) {
   }
   if (options.csrf) init.headers["X-CSRF-Token"] = options.csrf;
   if (options.token) init.headers.Authorization = `Bearer ${options.token}`;
+  if (options.notificationToken) init.headers["X-Notification-Token"] = options.notificationToken;
 
   let response;
   try {
@@ -207,14 +269,19 @@ export async function submitRequest(payload) {
     throw new ServiceError("The request service is not reachable, and demo fallback is disabled.", 503);
   }
   if (mode === "server") {
-    const result = await request("POST", "/api/requests", payload);
+    const result = await request("POST", "/api/requests", payload, {
+      notificationToken: getNotificationToken(),
+    });
+    saveNotificationToken(result.notificationToken);
     return { request: result.request, mode };
   }
   const record = validateRequestPayload(payload);
+  ensureDemoNotificationToken();
   const row = {
     ...record,
     id: newRequestId(),
     status: "pending",
+    allocatedQuantity: 0,
     submittedAt: new Date().toISOString(),
     decidedAt: null,
   };
@@ -267,36 +334,187 @@ export async function sessionState() {
   return { authenticated: true, csrfToken: result.csrfToken || null, mode, demo: false, sessionToken: result.sessionToken };
 }
 
+function requireDemoAdmin() {
+  try {
+    if (session().getItem(DEMO_SESSION_KEY) !== "1") {
+      throw new ServiceError("Your admin session has expired. Sign in again.", 401);
+    }
+  } catch (err) {
+    if (err instanceof ServiceError) throw err;
+    throw new ServiceError("Your admin session has expired. Sign in again.", 401);
+  }
+}
+
 export async function listRequests() {
   const mode = await detectMode();
   if (mode === "demo") {
-    try {
-      if (session().getItem(DEMO_SESSION_KEY) !== "1") throw new ServiceError("Your admin session has expired. Sign in again.", 401);
-    } catch (err) {
-      if (err instanceof ServiceError) throw err;
-      throw new ServiceError("Your admin session has expired. Sign in again.", 401);
-    }
+    requireDemoAdmin();
     return { requests: readDemoRequests(), mode, demo: true };
   }
   const result = await request("GET", "/api/admin/requests", undefined, { token: bearerToken() });
   return { requests: Array.isArray(result.requests) ? result.requests : [], mode, demo: false };
 }
 
-export async function decideRequest(id, status, csrf) {
+export async function listInventory() {
   const mode = await detectMode();
   if (mode === "demo") {
+    requireDemoAdmin();
+    return { inventory: readStoredArray(DEMO_INVENTORY_KEY), mode, demo: true };
+  }
+  const result = await request("GET", "/api/admin/inventory", undefined, { token: bearerToken() });
+  return { inventory: Array.isArray(result.inventory) ? result.inventory : [], mode, demo: false };
+}
+
+export async function setInventoryQuantity(itemName, availableQuantity, csrf) {
+  const cleanedName = String(itemName ?? "").trim();
+  const quantity = Number(availableQuantity);
+  if (!cleanedName || cleanedName.length > 100) throw new ServiceError("Enter a resource item name (max 100 characters).");
+  if (!Number.isInteger(quantity) || quantity < 0 || quantity > 1_000_000_000) {
+    throw new ServiceError("Available quantity must be a whole number from 0 to 1,000,000,000.");
+  }
+
+  const mode = await detectMode();
+  if (mode === "demo") {
+    requireDemoAdmin();
+    const inventory = readStoredArray(DEMO_INVENTORY_KEY);
+    const index = inventory.findIndex((item) => item.itemName.toLowerCase() === cleanedName.toLowerCase());
+    const item = { itemName: cleanedName, availableQuantity: quantity, updatedAt: new Date().toISOString() };
+    if (index < 0) inventory.push(item);
+    else inventory[index] = item;
+    writeStoredArray(DEMO_INVENTORY_KEY, inventory);
+    return { item, mode, demo: true };
+  }
+  const result = await request("POST", "/api/admin/inventory", {
+    itemName: cleanedName,
+    availableQuantity: quantity,
+  }, { csrf, token: bearerToken() });
+  return { item: result.item, mode, demo: false };
+}
+
+function decisionMessage(request, status, reason) {
+  const requested = Number(request.requestedQuantity || 0);
+  const allocated = Number(request.allocatedQuantity || 0);
+  const item = request.itemName || request.requiredResources?.[0] || "Relief supplies";
+  if (status === "accepted") {
+    return `Your request #${request.id} for ${requested} ${item} has been approved. You will receive the full requested quantity.`;
+  }
+  if (status === "partially_approved") {
+    return `Your request #${request.id} for ${requested} ${item} has been partially approved. It is critical, but only ${allocated} units are currently in stock. We are providing ${allocated} units now. The remaining amount will be provided later if more supplies arrive.`;
+  }
+  const why = String(reason || "Insufficient stock / not prioritized at this time").trim();
+  const ending = /[.!?]$/.test(why) ? "" : ".";
+  return `Your request #${request.id} for ${requested} ${item} has been rejected. Reason: ${why}${ending}`;
+}
+
+function decideDemoRequest(request, requestedStatus, reason) {
+  const quantity = Number(request.requestedQuantity || 0);
+  const inventory = readStoredArray(DEMO_INVENTORY_KEY);
+  const stockIndex = inventory.findIndex(
+    (item) => item.itemName.toLowerCase() === String(request.itemName || "").toLowerCase(),
+  );
+  const available = stockIndex < 0 ? 0 : Number(inventory[stockIndex].availableQuantity || 0);
+  let status = "rejected";
+  let allocatedQuantity = 0;
+  let decisionReason = null;
+
+  if (requestedStatus === "rejected") {
+    decisionReason = reason || "Not prioritized at this time.";
+  } else if (quantity === 0 || quantity <= available) {
+    status = "accepted";
+    allocatedQuantity = quantity;
+    if (quantity > 0 && stockIndex >= 0) {
+      inventory[stockIndex] = { ...inventory[stockIndex], availableQuantity: available - quantity, updatedAt: new Date().toISOString() };
+      writeStoredArray(DEMO_INVENTORY_KEY, inventory);
+    }
+  } else if (request.isCritical && available > 0) {
+    status = "partially_approved";
+    allocatedQuantity = available;
+    inventory[stockIndex] = { ...inventory[stockIndex], availableQuantity: 0, updatedAt: new Date().toISOString() };
+    writeStoredArray(DEMO_INVENTORY_KEY, inventory);
+  } else {
+    decisionReason = request.isCritical
+      ? "Insufficient stock; none is currently available."
+      : "Insufficient stock; this request was not marked critical and was not prioritized at this time.";
+  }
+
+  const updated = {
+    ...request,
+    status,
+    allocatedQuantity,
+    decisionReason,
+    decidedAt: new Date().toISOString(),
+  };
+  return { request: updated, messageToUser: decisionMessage(updated, status, decisionReason) };
+}
+
+export async function decideRequest(id, status, csrf, reason = null) {
+  const mode = await detectMode();
+  if (mode === "demo") {
+    requireDemoAdmin();
     const rows = readDemoRequests();
     const index = rows.findIndex((row) => row.id === id);
     if (index === -1) throw new ServiceError("That request no longer exists.", 404);
     if (rows[index].status !== "pending") {
       throw new ServiceError(`Request ${id} was already ${rows[index].status}.`, 409);
     }
-    rows[index] = { ...rows[index], status, decidedAt: new Date().toISOString() };
+    const decision = decideDemoRequest(rows[index], status, reason);
+    rows[index] = decision.request;
     writeDemoRequests(rows);
-    return { request: rows[index], mode, demo: true };
+    const notification = {
+      id: newRequestId(),
+      requestId: id,
+      message: decision.messageToUser,
+      status: "UNREAD",
+      createdAt: new Date().toISOString(),
+    };
+    writeStoredArray(DEMO_NOTIFICATIONS_KEY, [notification, ...readStoredArray(DEMO_NOTIFICATIONS_KEY)]);
+    return { ...decision, mode, demo: true };
   }
-  const result = await request("PATCH", `/api/admin/requests/${encodeURIComponent(id)}`, { status }, { csrf, token: bearerToken() });
-  return { request: result.request, mode, demo: false };
+  const result = await request(
+    "PATCH",
+    `/api/admin/requests/${encodeURIComponent(id)}`,
+    { status, reason },
+    { csrf, token: bearerToken() },
+  );
+  return {
+    request: result.request,
+    messageToUser: result.message_to_user,
+    notification: result.notification,
+    mode,
+    demo: false,
+  };
+}
+
+export async function listNotifications() {
+  const token = getNotificationToken();
+  if (!token) throw new ServiceError("No notification profile is linked to this browser yet. Submit a relief request first.", 401);
+  const mode = await detectMode();
+  if (mode === "demo") {
+    return { notifications: readStoredArray(DEMO_NOTIFICATIONS_KEY), mode, demo: true };
+  }
+  const result = await request("GET", "/api/notifications", undefined, { notificationToken: token });
+  return { notifications: Array.isArray(result.notifications) ? result.notifications : [], mode, demo: false };
+}
+
+export async function markNotificationRead(id) {
+  const token = getNotificationToken();
+  if (!token) throw new ServiceError("No notification profile is linked to this browser yet. Submit a relief request first.", 401);
+  const mode = await detectMode();
+  if (mode === "demo") {
+    const notifications = readStoredArray(DEMO_NOTIFICATIONS_KEY);
+    const index = notifications.findIndex((notification) => String(notification.id) === String(id));
+    if (index < 0) throw new ServiceError("That notification was not found.", 404);
+    notifications[index] = { ...notifications[index], status: "READ" };
+    writeStoredArray(DEMO_NOTIFICATIONS_KEY, notifications);
+    return { notification: notifications[index], mode, demo: true };
+  }
+  const result = await request(
+    "PATCH",
+    `/api/notifications/${encodeURIComponent(id)}`,
+    { status: "READ" },
+    { notificationToken: token },
+  );
+  return { notification: result.notification, mode, demo: false };
 }
 
 export async function logout(csrf) {

@@ -104,7 +104,7 @@ The system is organized into four core-system modules sitting between input sour
 
 ## Web Admin Module: Request Review
 
-A password-protected web admin module is available at `/admin`. The public relief-request form now posts to the same server-side API, so submissions from different browsers are visible in one dashboard. New requests start as `pending`; an admin can accept or reject them, and each decision is stored with a timestamp.
+A password-protected web admin module is available at `/admin`. The public relief-request form posts to the shared server-side API, so submissions from different browsers are visible in one dashboard. Requests carry a primary resource item, quantity, and critical flag. Admin decisions consume the server-side SQLite inventory, partially fulfill critical requests when stock is short, and create a stored user notification whose exact text is also returned to the admin UI.
 
 ### Run locally
 
@@ -118,23 +118,25 @@ python3 backend/admin_server.py --set-password
 python3 backend/admin_server.py
 ```
 
-Open `http://localhost:8000/` for the public site and `http://localhost:8000/admin` for admin sign-in. The SQLite file is created at `backend/data/drras.sqlite3` and is intentionally ignored by Git. Set `DRRAS_DB_PATH=/path/to/requests.sqlite3` to select another durable location; use that same value for password setup and when starting the server. Run `python3 -m unittest discover -s backend/tests -v` for backend tests.
+Open `http://localhost:8000/` for the public site and `http://localhost:8000/admin` for admin sign-in. Set initial stock in the admin dashboard's **Available inventory** panel before accepting quantified requests. The SQLite file is created at `backend/data/drras.sqlite3` and is intentionally ignored by Git. Set `DRRAS_DB_PATH=/path/to/requests.sqlite3` to select another durable location; use that same value for password setup and when starting the server. Run `python3 -m unittest discover -s backend/tests -v` for backend tests.
 
 ### Routes and protection
 
-- `POST /api/requests` — validates and saves a public request as pending.
+- `POST /api/requests` — validates and saves a pending request. Provide `itemName`, `requestedQuantity`, and optionally `isCritical` (otherwise criticality follows `severity`). The response includes the request and a per-user `notificationToken`; keep it private and send it as `X-Notification-Token` when submitting more requests from the same browser.
 - `POST /api/admin/login` — verifies the configured password and issues an opaque, server-side session cookie.
-- `GET /api/admin/session` and `GET /api/admin/requests` — require a valid admin session.
-- `PATCH /api/admin/requests/{id}` with `{"status":"accepted"}` or `{"status":"rejected"}` — requires the admin session and a CSRF token; a request can only be reviewed once.
+- `GET /api/admin/session`, `GET /api/admin/requests`, and `GET /api/admin/inventory` — require a valid admin session.
+- `POST /api/admin/inventory` with `{"itemName":"Drinking water","availableQuantity":30}` — creates or replaces the available stock for an item; requires the admin session and CSRF token.
+- `PATCH /api/admin/requests/{id}` with `{"status":"accepted"}` or `{"status":"rejected","reason":"..."}` — requires the admin session and CSRF token; a request can only be reviewed once. Accepting consumes matching stock. If the requested amount exceeds stock, critical requests receive all remaining units and become `partially_approved`; non-critical requests are rejected for insufficient stock. The response contains the updated `request`, `message_to_user`, and saved `notification`.
+- `GET /api/notifications` with `X-Notification-Token` — returns only that user's messages. `PATCH /api/notifications/{id}` with `{"status":"READ"}` marks one of that user's notifications as read.
 - `POST /api/admin/logout` — revokes the session.
 
-Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes, not in the browser or source. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, expire after eight hours, and admin mutations require a CSRF token. Login attempts are rate-limited. This small `http.server` implementation is a starter/demo, not a hardened public production server. Before public deployment, port the handlers to a production-grade application server (or a hardened gateway with strict request limits), use HTTPS and set `DRRAS_COOKIE_SECURE=1`, serve `/` and `/api` on the same origin, and configure backups/monitoring. A static-only host such as GitHub Pages cannot run this Python API by itself; the frontend degrades to demo mode there (see Deployment).
+There is no end-user password/account system in the existing app, so submissions get an unguessable notification token that acts as a private capability for reading that user's messages. Only a hash of the token is stored in SQLite; the browser keeps the raw token locally. Treat it like a password and use HTTPS in deployment. Inventory in this API is separate from the browser-local Resources demo and the C++ CSV data. Existing SQLite request rows are migrated with an unspecified (zero) quantity so they remain reviewable without fabricated stock. Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes, not in the browser or source. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, expire after eight hours, and admin mutations require a CSRF token. Login attempts are rate-limited. This small `http.server` implementation is a starter/demo, not a hardened public production server. Before public deployment, port the handlers to a production-grade application server (or a hardened gateway with strict request limits), use HTTPS and set `DRRAS_COOKIE_SECURE=1`, serve `/` and `/api` on the same origin, and configure backups/monitoring. A static-only host such as GitHub Pages cannot run this Python API by itself; the frontend degrades to demo mode there (see Deployment).
 
 ### Connecting request storage to the rest of the project
 
 The checked-in project did not have a shared web database: `docs/js/storage.js` stored the browser demo data in that browser's `localStorage`, while the separate C++ console program persists records as CSV using `FileManager`. A server cannot read a visitor's `localStorage`, so the request form was wired to this SQLite-backed API; that SQLite database is now the shared source of truth for web requests and admin review. Existing browser-local records are not automatically imported, and the admin decision does not automatically dispatch resources or write into the C++ CSV files.
 
-If you already have a server-side request database, keep the browser route contract above and replace the persistence methods in `backend/admin_server.py` (`Store.create_request`, `Store.list_requests`, and `Store.set_request_status`) with calls to that database/repository. Keep the password/session/CSRF checks in the HTTP layer. If accepted requests must become operational C++ disasters, add an explicit promotion/export adapter after acceptance; do not point both stores at files that are being rewritten independently. Back up the SQLite file and restrict filesystem access to the service account.
+If you already have a server-side request database, keep the browser route contract above and replace the persistence methods in `backend/admin_server.py` (`Store.create_request_with_notification_token`, `Store.list_requests`, `Store.process_request`, and the inventory/notification methods) with calls to that database/repository. Keep the password/session/CSRF checks in the HTTP layer. If accepted requests must become operational C++ disasters, add an explicit promotion/export adapter after acceptance; do not point both stores at files that are being rewritten independently. Back up the SQLite file and restrict filesystem access to the service account.
 
 ## Deployment
 

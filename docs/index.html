@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DRRAS — Disaster Relief Resource Allocation System</title>
-<link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/style.css?v=2">
 </head>
 <body>
 
@@ -16,6 +16,7 @@
 <nav class="tabs">
   <button class="tab-btn active" data-target="dashboard">Dashboard</button>
   <button class="tab-btn" data-target="disasters">Report / View Disasters</button>
+  <button class="tab-btn" data-target="notifications">My Messages</button>
   <button class="tab-btn" data-target="resources">Resources</button>
   <button class="tab-btn" data-target="hospitals">Hospitals</button>
   <button class="tab-btn" data-target="shelters">Shelters</button>
@@ -52,6 +53,8 @@
         </select>
       </label>
       <label>Affected People <input type="number" id="dAffected" min="0" required></label>
+      <label>Primary resource item <input type="text" id="dResourceItem" maxlength="100" placeholder="e.g. drinking water" required></label>
+      <label>Quantity requested <input type="number" id="dRequestedQuantity" min="1" step="1" required></label>
       <label>Location Name <input type="text" id="dLocation" required></label>
       <label>Latitude <input type="number" step="any" id="dLat" min="-90" max="90" required></label>
       <label>Longitude <input type="number" step="any" id="dLon" min="-180" max="180" required></label>
@@ -71,6 +74,15 @@
     <h2>Operational Demo Disasters</h2>
     <p class="request-note">These sample operational records remain in this browser's local storage. Incoming public requests are reviewed separately in the <a href="admin.html">Admin dashboard</a>.</p>
     <div id="disasterList" class="card-list"></div>
+  </section>
+
+  <!-- USER NOTIFICATIONS -->
+  <section id="notifications" class="panel hidden">
+    <h2>My Messages</h2>
+    <p class="request-note">Decision updates are linked to this browser using a private notification token created when you submit a request. There are no end-user accounts in this demo.</p>
+    <button id="refreshNotificationsBtn" class="btn">Refresh messages</button>
+    <p id="notificationsStatus" role="status" aria-live="polite"></p>
+    <div id="notificationList" class="card-list"></div>
   </section>
 
   <!-- RESOURCES -->
@@ -207,6 +219,6 @@
   <p><button id="resetDataBtn" class="btn btn-danger">Reset All Data</button></p>
 </footer>
 
-<script type="module" src="js/main.js"></script>
+<script type="module" src="js/main.js?v=2"></script>
 </body>
 </html>
