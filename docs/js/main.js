@@ -8,7 +8,12 @@ import { RouteManager } from "./routeManager.js";
 import { sortByDistance } from "./distanceCalculator.js";
 import { seedDisasters, seedResources, seedHospitals, seedShelters } from "./seedData.js";
 import { clearAll } from "./storage.js";
-import { bannerText, submitRequest } from "./requestService.js";
+import {
+  bannerText,
+  listNotifications,
+  markNotificationRead,
+  submitRequest,
+} from "./requestService.js";
 import * as ui from "./ui.js";
 
 // ---- Initialize managers ----
@@ -37,6 +42,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.classList.add("active");
     document.getElementById(btn.dataset.target).classList.remove("hidden");
     refreshAll();
+    if (btn.dataset.target === "notifications") refreshUserNotifications();
   });
 });
 
@@ -81,6 +87,9 @@ ui.el("disasterForm").addEventListener("submit", async (e) => {
       type: ui.el("dType").value,
       severity: ui.el("dSeverity").value,
       affectedPeople: Number(ui.el("dAffected").value),
+      itemName: ui.el("dResourceItem").value.trim(),
+      requestedQuantity: Number(ui.el("dRequestedQuantity").value),
+      isCritical: ui.el("dSeverity").value === "CRITICAL",
       requiredResources: [...document.querySelectorAll("#disasterForm .checkbox-group input:checked")].map((c) => c.value),
       locationName: ui.el("dLocation").value.trim(),
       latitude: Number(ui.el("dLat").value),
@@ -97,6 +106,7 @@ ui.el("disasterForm").addEventListener("submit", async (e) => {
     const lines = [
       `Request ID       : ${request.id}`,
       `Review status    : PENDING`,
+      `Resource request : ${request.requestedQuantity} ${request.itemName}`,
       `Stored in        : ${result.mode === "server" ? "the shared request database" : "this browser only (no server)"}`,
       `Location         : ${request.locationName}`,
       ``,
@@ -305,6 +315,14 @@ function getStatusDetails(status) {
       badgeClass: "status-badge accepted",
       badgeText: "ACCEPTED",
     };
+  } else if (s === "partially_approved") {
+    return {
+      title: "Critical Request Partially Approved",
+      message: "Some resources are available now; the remaining amount may be provided if additional stock arrives.",
+      advice: "Please check My Messages for the exact quantity allocated and keep your communication line open.",
+      badgeClass: "status-badge partially-approved",
+      badgeText: "PARTIALLY APPROVED",
+    };
   } else if (s === "rejected") {
     return {
       title: "Request Reviewed and Closed",
@@ -356,3 +374,58 @@ function renderStatusCard(container, req, details) {
     </div>
   `;
 }
+
+async function refreshUserNotifications() {
+  const status = ui.el("notificationsStatus");
+  const list = ui.el("notificationList");
+  status.textContent = "Loading messages…";
+  list.replaceChildren();
+  try {
+    const result = await listNotifications();
+    const notifications = Array.isArray(result.notifications) ? result.notifications : [];
+    status.textContent = notifications.length
+      ? `${notifications.length} ${notifications.length === 1 ? "message" : "messages"}`
+      : "No decision messages yet. Check back after your request is reviewed.";
+
+    for (const notification of notifications) {
+      const card = document.createElement("article");
+      card.className = `notification-card ${notification.status === "UNREAD" ? "unread" : "read"}`;
+      const header = document.createElement("div");
+      header.className = "notification-heading";
+      const requestLabel = document.createElement("strong");
+      requestLabel.textContent = `Request ${notification.requestId}`;
+      const state = document.createElement("span");
+      state.textContent = notification.status === "READ" ? "Read" : "Unread";
+      header.append(requestLabel, state);
+      const message = document.createElement("p");
+      message.textContent = notification.message;
+      const time = document.createElement("small");
+      const date = new Date(notification.createdAt);
+      time.textContent = Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+      card.append(header, message, time);
+
+      if (notification.status !== "READ") {
+        const readButton = document.createElement("button");
+        readButton.type = "button";
+        readButton.className = "btn notification-read-button";
+        readButton.textContent = "Mark as read";
+        readButton.addEventListener("click", async () => {
+          readButton.disabled = true;
+          try {
+            await markNotificationRead(notification.id);
+            await refreshUserNotifications();
+          } catch (error) {
+            status.textContent = error.message || "Could not update this message.";
+            readButton.disabled = false;
+          }
+        });
+        card.append(readButton);
+      }
+      list.append(card);
+    }
+  } catch (error) {
+    status.textContent = error.message || "Could not load messages.";
+  }
+}
+
+ui.el("refreshNotificationsBtn").addEventListener("click", refreshUserNotifications);
