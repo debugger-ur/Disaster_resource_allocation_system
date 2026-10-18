@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#102a43">
   <title>Admin · Disaster Relief Resource Allocation System</title>
-  <link rel="stylesheet" href="css/admin.css?v=2">
-  <script type="module" src="js/admin.js?v=2"></script>
+  <link rel="stylesheet" href="css/admin.css?v=3">
+  <script type="module" src="js/admin.js?v=3"></script>
 </head>
 <body>
   <header class="topbar">
@@ -66,6 +66,11 @@
           <strong id="acceptedCount">0</strong>
           <span class="summary-caption">Approved by admin</span>
         </article>
+        <article class="summary-card summary-partial">
+          <span class="summary-label">Partially approved</span>
+          <strong id="partialCount">0</strong>
+          <span class="summary-caption">Critical requests partly filled</span>
+        </article>
         <article class="summary-card summary-rejected">
           <span class="summary-label">Rejected</span>
           <strong id="rejectedCount">0</strong>
@@ -90,6 +95,7 @@
               <option value="all">All requests</option>
               <option value="pending">Pending</option>
               <option value="accepted">Accepted</option>
+              <option value="partially_approved">Partially approved</option>
               <option value="rejected">Rejected</option>
             </select>
           </label>
@@ -102,7 +108,9 @@
               <tr>
                 <th scope="col">Request</th>
                 <th scope="col">Location</th>
-                <th scope="col">Resources needed</th>
+                <th scope="col">Requested item</th>
+                <th scope="col">Qty requested / allocated</th>
+                <th scope="col">Resource categories</th>
                 <th scope="col">Submitted</th>
                 <th scope="col">Decision</th>
                 <th scope="col"><span class="visually-hidden">Actions</span></th>
@@ -117,7 +125,32 @@
           </div>
         </div>
       </section>
-      <p class="data-note">An approval decision is recorded in the request database. It does not automatically dispatch supplies.</p>
+
+      <section class="inventory-panel" aria-labelledby="inventoryHeading">
+        <div class="inventory-heading">
+          <div>
+            <h2 id="inventoryHeading">Available inventory</h2>
+            <p class="muted">Set stock by the exact resource item name used on requests. Matching is case-insensitive.</p>
+          </div>
+        </div>
+        <form id="inventoryForm" class="inventory-form">
+          <label for="inventoryItemName">Resource item
+            <input id="inventoryItemName" name="itemName" maxlength="100" placeholder="e.g. drinking water" required>
+          </label>
+          <label for="inventoryQuantity">Available quantity
+            <input id="inventoryQuantity" name="availableQuantity" type="number" min="0" max="1000000000" step="1" required>
+          </label>
+          <button id="inventorySaveButton" class="button button-primary" type="submit">Save stock</button>
+        </form>
+        <p id="inventoryMessage" class="inventory-message" role="status" aria-live="polite"></p>
+        <div class="table-scroll">
+          <table class="request-table inventory-table">
+            <thead><tr><th scope="col">Item</th><th scope="col">Available units</th><th scope="col">Last updated</th></tr></thead>
+            <tbody id="inventoryRows"></tbody>
+          </table>
+        </div>
+      </section>
+      <p class="data-note">Approving a request consumes stock and automatically creates a user notification. The approval does not dispatch supplies into the separate browser/C++ operations demo.</p>
     </section>
   </main>
 

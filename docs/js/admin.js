@@ -12,8 +12,10 @@ const statusFilter = document.getElementById("statusFilter");
 import {
   bannerText,
   decideRequest,
+  listInventory,
   listRequests,
   login,
+  setInventoryQuantity,
   logout,
   sessionState,
 } from "./requestService.js";
@@ -75,12 +77,13 @@ function formatDate(value) {
 }
 
 function setSummaryCounts(allRequests) {
-  const counts = { pending: 0, accepted: 0, rejected: 0 };
+  const counts = { pending: 0, accepted: 0, partially_approved: 0, rejected: 0 };
   allRequests.forEach((request) => {
     if (Object.hasOwn(counts, request.status)) counts[request.status] += 1;
   });
   document.getElementById("pendingCount").textContent = counts.pending;
   document.getElementById("acceptedCount").textContent = counts.accepted;
+  document.getElementById("partialCount").textContent = counts.partially_approved;
   document.getElementById("rejectedCount").textContent = counts.rejected;
   document.getElementById("totalCount").textContent = allRequests.length;
 }
@@ -124,6 +127,14 @@ function renderRequests() {
       ),
     );
 
+    const itemCell = element("td");
+    itemCell.append(element("div", "resource-list", request.itemName || "Relief supplies"));
+    if (request.isCritical) itemCell.append(element("span", "severity severity-critical", "Critical"));
+
+    const quantityCell = element("td", "quantity-cell");
+    quantityCell.append(element("div", "", `${Number(request.requestedQuantity || 0)} requested`));
+    quantityCell.append(element("div", "reviewed-note", `${Number(request.allocatedQuantity || 0)} allocated`));
+
     const resourcesCell = element("td");
     resourcesCell.append(
       element(
@@ -137,8 +148,11 @@ function renderRequests() {
     submittedCell.append(element("div", "submitted-time", formatDate(request.submittedAt)));
 
     const decisionCell = element("td", "decision-cell");
+    const statusLabel = request.status === "partially_approved"
+      ? "Partially approved"
+      : request.status;
     decisionCell.append(
-      element("span", `status-pill status-${request.status}`, request.status),
+      element("span", `status-pill status-${request.status}`, statusLabel),
     );
     if (request.decidedAt) {
       decisionCell.append(element("div", "reviewed-note", `Reviewed ${formatDate(request.decidedAt)}`));
@@ -162,18 +176,37 @@ function renderRequests() {
       actionsCell.append(element("span", "reviewed-note", "Reviewed"));
     }
 
-    row.append(requestCell, locationCell, resourcesCell, submittedCell, decisionCell, actionsCell);
+    row.append(requestCell, locationCell, itemCell, quantityCell, resourcesCell, submittedCell, decisionCell, actionsCell);
     requestRows.append(row);
   }
 }
 
-async function loadRequests() {
-  dashboardMessage.textContent = "";
+async function loadRequests({ clearMessage = true } = {}) {
+  if (clearMessage) {
+    dashboardMessage.textContent = "";
+    dashboardMessage.classList.remove("success");
+  }
   const result = await listRequests();
   setDemoNotice(Boolean(result.demo));
   requests = Array.isArray(result.requests) ? result.requests : [];
   setSummaryCounts(requests);
   renderRequests();
+}
+
+async function loadInventory() {
+  const result = await listInventory();
+  setDemoNotice(Boolean(result.demo));
+  const rows = document.getElementById("inventoryRows");
+  rows.replaceChildren();
+  for (const item of result.inventory || []) {
+    const row = document.createElement("tr");
+    row.append(
+      element("td", "", item.itemName),
+      element("td", "", Number(item.availableQuantity).toLocaleString()),
+      element("td", "submitted-time", formatDate(item.updatedAt)),
+    );
+    rows.append(row);
+  }
 }
 
 loginForm.addEventListener("submit", async (event) => {
@@ -188,7 +221,7 @@ loginForm.addEventListener("submit", async (event) => {
     setDemoNotice(Boolean(result.demo));
     showDashboard(result.csrfToken);
     try {
-      await loadRequests();
+      await Promise.all([loadRequests(), loadInventory()]);
     } catch (error) {
       if (error.status === 401) showLogin(sessionLostMessage());
       else dashboardMessage.textContent = error.message;
@@ -208,10 +241,32 @@ document.getElementById("refreshButton").addEventListener("click", async (event)
   button.disabled = true;
   dashboardMessage.textContent = "";
   try {
-    await loadRequests();
+    await Promise.all([loadRequests(), loadInventory()]);
   } catch (error) {
     if (error.status === 401) showLogin(sessionLostMessage());
     else dashboardMessage.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById("inventoryForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = document.getElementById("inventorySaveButton");
+  const message = document.getElementById("inventoryMessage");
+  button.disabled = true;
+  message.textContent = "";
+  try {
+    const result = await setInventoryQuantity(
+      document.getElementById("inventoryItemName").value,
+      Number(document.getElementById("inventoryQuantity").value),
+      csrfToken,
+    );
+    setDemoNotice(Boolean(result.demo));
+    message.textContent = `${result.item.itemName}: ${Number(result.item.availableQuantity).toLocaleString()} units available.`;
+    await loadInventory();
+  } catch (error) {
+    message.textContent = error.message || "Could not save inventory stock.";
   } finally {
     button.disabled = false;
   }
@@ -229,14 +284,21 @@ requestRows.addEventListener("click", async (event) => {
   const rowButtons = button.closest("tr").querySelectorAll("button");
   rowButtons.forEach((item) => { item.disabled = true; });
   dashboardMessage.textContent = "";
+  dashboardMessage.classList.remove("success");
   try {
-    await decideRequest(request.id, action, csrfToken);
-    await loadRequests();
+    const outcome = await decideRequest(request.id, action, csrfToken);
+    await Promise.all([
+      loadRequests({ clearMessage: false }).catch(() => {}),
+      loadInventory().catch(() => {}),
+    ]);
+    dashboardMessage.textContent = `User will see: ${outcome.messageToUser}`;
+    dashboardMessage.classList.add("success");
   } catch (error) {
     if (error.status === 401) showLogin(sessionLostMessage());
     else {
-      await loadRequests().catch(() => {});
+      await Promise.all([loadRequests({ clearMessage: false }), loadInventory()]).catch(() => {});
       dashboardMessage.textContent = error.message;
+      dashboardMessage.classList.remove("success");
     }
   }
 });
@@ -267,7 +329,7 @@ async function initialize() {
     const session = await sessionState();
     setDemoNotice(Boolean(session.demo));
     showDashboard(session.csrfToken);
-    await loadRequests();
+    await Promise.all([loadRequests(), loadInventory()]);
   } catch (error) {
     if (error.status === 401) showLogin();
     else showLogin(error.message || "The admin service could not be reached. Please try again shortly.");
