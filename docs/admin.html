@@ -117,8 +117,21 @@
           </div>
         </div>
       </section>
-      <p class="data-note">An approval decision is recorded in the request database. It does not automatically dispatch supplies.</p>
+      <p class="data-note">Accepting a request allocates the requested supplies from current stock (capped at what is on hand) and records your message for the user. Rejecting records the message only.</p>
     </section>
+
+    <dialog id="decisionDialog" class="decision-dialog" aria-labelledby="decisionDialogTitle">
+      <h2 id="decisionDialogTitle">Record decision</h2>
+      <p class="muted" id="decisionDialogIntro">The message below is delivered to the user with your decision.</p>
+      <label for="decisionMessage">Message to the user</label>
+      <textarea id="decisionMessage" rows="5" maxlength="1000"></textarea>
+      <p class="dialog-hint">This text is shown to the user on the track-status page. Keep it short and concrete — what was decided, what will be provided, and what to do next.</p>
+      <p id="decisionError" class="message" role="alert" aria-live="polite"></p>
+      <div class="dialog-actions">
+        <button type="button" class="button button-quiet" id="decisionCancel">Cancel</button>
+        <button type="button" class="button button-primary" id="decisionConfirm">Save decision</button>
+      </div>
+    </dialog>
   </main>
 
   <footer class="page-footer">DRRAS · Admin access</footer>

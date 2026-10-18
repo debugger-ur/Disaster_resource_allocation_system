@@ -74,6 +74,37 @@ SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
 RESOURCE_CATEGORIES = {"Ambulance", "RescueTeam", "MedicalTeam", "Equipment", "Supply"}
 STATUSES = ("pending", "accepted", "rejected")
 
+# Supplies physically on hand per resource category ("at this moment"). Admins
+# can adjust the numbers through PUT /api/admin/inventory; fresh databases start
+# from these figures (totals of the sample data/resources.csv in the C++ app).
+DEFAULT_INVENTORY = {
+    "Ambulance": 3,
+    "RescueTeam": 18,
+    "MedicalTeam": 5,
+    "Equipment": 2,
+    "Supply": 1500,
+}
+MAX_RESOURCE_QUANTITY = 1_000_000_000
+MESSAGE_MAX_LENGTH = 1000
+
+# Delivered to the user whenever an admin accepts or rejects without writing a
+# custom note. The user reads them on the public status endpoint / track form.
+DEFAULT_ACCEPT_MESSAGE = (
+    "Your relief request has been ACCEPTED by the command center. "
+    "Relief units are being dispatched to your location. "
+    "Please stay in a safe, accessible area and keep your communication line open."
+)
+DEFAULT_REJECT_MESSAGE = (
+    "Your relief request has been reviewed and REJECTED by the command center. "
+    "This typically happens when the zone is already covered by ongoing operations "
+    "or the request was merged with a duplicate. "
+    "If you are in immediate danger, please contact local emergency services (112)."
+)
+DEFAULT_DECISION_MESSAGES = {
+    "accepted": DEFAULT_ACCEPT_MESSAGE,
+    "rejected": DEFAULT_REJECT_MESSAGE,
+}
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS admin_credentials (
     id           INTEGER PRIMARY KEY CHECK (id = 1),
@@ -101,7 +132,16 @@ CREATE TABLE IF NOT EXISTS requests (
     longitude          REAL    NOT NULL,
     status             TEXT    NOT NULL DEFAULT 'pending',
     submitted_at       TEXT    NOT NULL,
-    decided_at         TEXT
+    decided_at         TEXT,
+    resource_quantities TEXT   NOT NULL DEFAULT '{}',
+    granted_resources  TEXT    NOT NULL DEFAULT '{}',
+    user_message       TEXT,
+    decision_message   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS inventory (
+    category TEXT    PRIMARY KEY,
+    quantity INTEGER NOT NULL CHECK (quantity >= 0)
 );
 
 CREATE TABLE IF NOT EXISTS login_attempts (
@@ -148,6 +188,26 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+            # Seed the starting stock once; later runs keep whatever admins set.
+            for category, quantity in DEFAULT_INVENTORY.items():
+                conn.execute(
+                    "INSERT OR IGNORE INTO inventory (category, quantity) VALUES (?, ?)",
+                    (category, quantity),
+                )
+
+    @staticmethod
+    def _migrate(conn) -> None:
+        """Adds columns introduced after a database was first created."""
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(requests)")}
+        for name, declaration in (
+            ("resource_quantities", "TEXT NOT NULL DEFAULT '{}'"),
+            ("granted_resources", "TEXT NOT NULL DEFAULT '{}'"),
+            ("user_message", "TEXT"),
+            ("decision_message", "TEXT"),
+        ):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {declaration}")
 
     @contextmanager
     def _connect(self):
@@ -265,18 +325,50 @@ class Store:
         with self._connect() as conn:
             conn.execute("DELETE FROM login_attempts WHERE ip = ?", (ip,))
 
+    # ---- inventory (supplies on hand per resource category) ----
+
+    def get_inventory(self) -> dict[str, int]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT category, quantity FROM inventory").fetchall()
+        return {row["category"]: int(row["quantity"]) for row in rows}
+
+    def set_inventory(self, quantities: dict[str, int]) -> dict[str, int]:
+        """Sets absolute stock levels for the listed categories (admin action)."""
+        with self._connect() as conn:
+            for category, quantity in quantities.items():
+                conn.execute(
+                    """
+                    INSERT INTO inventory (category, quantity) VALUES (?, ?)
+                    ON CONFLICT(category) DO UPDATE SET quantity = excluded.quantity
+                    """,
+                    (category, quantity),
+                )
+            rows = conn.execute("SELECT category, quantity FROM inventory").fetchall()
+        return {row["category"]: int(row["quantity"]) for row in rows}
+
+    @staticmethod
+    def _load_inventory(conn) -> dict[str, int]:
+        rows = conn.execute("SELECT category, quantity FROM inventory").fetchall()
+        return {row["category"]: int(row["quantity"]) for row in rows}
+
     # ---- requests ----
 
     def create_request(self, data: dict) -> dict:
         request_id = f"REQ-{secrets.token_hex(4).upper()}"
         submitted = iso(utc_now())
+        requested = data.get("resourceQuantities") or {}
         with self._connect() as conn:
+            inventory = self._load_inventory(conn)
+            granted, user_message = plan_submission_grant(
+                requested, inventory, data["severity"]
+            )
             conn.execute(
                 """
                 INSERT INTO requests (
                     id, type, severity, affected_people, required_resources,
-                    location_name, latitude, longitude, status, submitted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    location_name, latitude, longitude, status, submitted_at,
+                    resource_quantities, granted_resources, user_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
                 """,
                 (
                     request_id,
@@ -288,6 +380,9 @@ class Store:
                     data["latitude"],
                     data["longitude"],
                     submitted,
+                    json.dumps(requested),
+                    json.dumps(granted),
+                    user_message,
                 ),
             )
         return self.get_request(request_id)  # type: ignore[return-value]
@@ -304,18 +399,67 @@ class Store:
             ).fetchall()
         return [self._to_dict(row) for row in rows]
 
-    def set_request_status(self, request_id: str, status: str) -> dict:
+    def set_request_status(
+        self, request_id: str, status: str, message: str | None = None
+    ) -> dict:
+        """Records an admin decision and the message shown to the user.
+
+        On acceptance the requested quantities are allocated from current stock
+        (capped at what is on hand — the request never takes stock negative) and
+        the delivered amounts are stored in granted_resources.
+        """
+        decision_message = (message or "").strip() or DEFAULT_DECISION_MESSAGES[status]
         with self._connect() as conn:
-            row = conn.execute("SELECT status FROM requests WHERE id = ?", (request_id,)).fetchone()
+            row = conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone()
             if row is None:
                 raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
             if row["status"] != "pending":
                 raise ApiError(
                     f"Request {request_id} was already {row['status']}.", HTTPStatus.CONFLICT
                 )
+            requested = self._decode_json(row["resource_quantities"], {})
+            granted: dict[str, int] = {}
+            if status == "accepted" and requested:
+                inventory = self._load_inventory(conn)
+                for category, quantity in requested.items():
+                    available = inventory.get(category, 0)
+                    delivered = min(quantity, available)
+                    if delivered > 0:
+                        granted[category] = delivered
+                        inventory[category] = available - delivered
+                for category, quantity in inventory.items():
+                    conn.execute(
+                        "UPDATE inventory SET quantity = ? WHERE category = ?",
+                        (quantity, category),
+                    )
+                short = {
+                    category: (quantity, granted.get(category, 0))
+                    for category, quantity in requested.items()
+                    if granted.get(category, 0) < quantity
+                }
+                if short:
+                    detail = "; ".join(
+                        f"{delivered} of {quantity} {category}"
+                        for category, (quantity, delivered) in sorted(short.items())
+                    )
+                    decision_message += (
+                        " Supplies note: only the stock at this moment could be "
+                        f"provided — {detail}; this much only can be provided at the "
+                        "moment. The remainder follows when supplies are replenished."
+                    )
             conn.execute(
-                "UPDATE requests SET status = ?, decided_at = ? WHERE id = ?",
-                (status, iso(utc_now()), request_id),
+                """
+                UPDATE requests
+                SET status = ?, decided_at = ?, granted_resources = ?, decision_message = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    iso(utc_now()),
+                    json.dumps(granted),
+                    decision_message,
+                    request_id,
+                ),
             )
         updated = self.get_request(request_id)
         if updated is None:  # pragma: no cover - defensive
@@ -323,25 +467,135 @@ class Store:
         return updated
 
     @staticmethod
-    def _to_dict(row: sqlite3.Row) -> dict:
-        """Maps snake_case columns onto the camelCase shape docs/js expects."""
+    def _decode_json(raw: object, fallback):
         try:
-            resources = json.loads(row["required_resources"])
+            return json.loads(raw) if raw is not None else fallback
         except (TypeError, json.JSONDecodeError):
+            return fallback
+
+    @classmethod
+    def _to_dict(cls, row: sqlite3.Row) -> dict:
+        """Maps snake_case columns onto the camelCase shape docs/js expects."""
+        resources = cls._decode_json(row["required_resources"], [])
+        if not isinstance(resources, list):
             resources = []
+        quantities = cls._decode_json(row["resource_quantities"], {})
+        if not isinstance(quantities, dict):
+            quantities = {}
+        granted = cls._decode_json(row["granted_resources"], {})
+        if not isinstance(granted, dict):
+            granted = {}
+
+        def as_counts(raw: dict) -> dict[str, int]:
+            counts: dict[str, int] = {}
+            for key, value in raw.items():
+                try:
+                    counts[str(key)] = int(value)
+                except (TypeError, ValueError):
+                    continue
+            return counts
+
         return {
             "id": row["id"],
             "type": row["type"],
             "severity": row["severity"],
             "affectedPeople": int(row["affected_people"]),
             "requiredResources": resources,
+            "resourceQuantities": as_counts(quantities),
+            "grantedResources": as_counts(granted),
             "locationName": row["location_name"],
             "latitude": float(row["latitude"]),
             "longitude": float(row["longitude"]),
             "status": row["status"],
             "submittedAt": row["submitted_at"],
             "decidedAt": row["decided_at"],
+            "userMessage": row["user_message"],
+            "decisionMessage": row["decision_message"],
         }
+
+
+def plan_submission_grant(
+    requested: dict[str, int], available: dict[str, int], severity: str
+) -> tuple[dict[str, int], str | None]:
+    """Decides what the user is promised the moment they ask.
+
+    Returns ``(grantedResources, user_message)``. When the ask is beyond the
+    supplies on hand ("off the limits") and the situation is CRITICAL, the user
+    is granted at least the stock present at that moment and told exactly how
+    much that is. Non-critical over-limit asks get no automatic grant — they are
+    flagged for the admin, who decides what can be provided.
+    """
+    if not requested:
+        return {}, None
+    short = {
+        category: (quantity, available.get(category, 0))
+        for category, quantity in requested.items()
+        if quantity > available.get(category, 0)
+    }
+    if not short:
+        return dict(requested), None
+    if severity == "CRITICAL":
+        granted = {
+            category: min(quantity, available.get(category, 0))
+            for category, quantity in requested.items()
+        }
+        granted = {category: amount for category, amount in granted.items() if amount > 0}
+        detail = "; ".join(
+            f"{granted.get(category, 0)} of {quantity} {category} (in stock now: {stock})"
+            for category, (quantity, stock) in sorted(short.items())
+        )
+        message = (
+            "Critical situation: the supplies you asked for are beyond the limits "
+            f"of what is in stock right now. You are guaranteed at least the supplies "
+            f"present at this moment: {detail}. In other words, this much only can "
+            "be provided at the moment; the rest will be dispatched when supplies "
+            "are replenished."
+        )
+        return granted, message
+    detail = "; ".join(
+        f"{category}: asked {quantity}, in stock {stock}"
+        for category, (quantity, stock) in sorted(short.items())
+    )
+    message = (
+        "The supplies you asked for are beyond the limits of what is in stock "
+        f"right now ({detail}). Your request has been flagged for admin review; "
+        "an admin will decide what can be provided at the moment."
+    )
+    return {}, message
+
+
+def validate_decision_message(raw: object) -> str | None:
+    """Optional admin note delivered to the user with the decision."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ApiError("Message must be text.")
+    text = raw.strip()
+    if not text:
+        return None
+    if len(text) > MESSAGE_MAX_LENGTH:
+        raise ApiError(f"Message is too long (max {MESSAGE_MAX_LENGTH} characters).")
+    return html.escape(text, quote=False)
+
+
+def validate_inventory_payload(raw: object) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        raise ApiError("Expected a JSON object.")
+    quantities_raw = raw.get("quantities")
+    if not isinstance(quantities_raw, dict) or not quantities_raw:
+        raise ApiError("'quantities' must be an object of category: amount pairs.")
+    quantities: dict[str, int] = {}
+    for category, amount in quantities_raw.items():
+        name = str(category).strip()
+        if name not in RESOURCE_CATEGORIES:
+            raise ApiError(f"Unknown resource category: {name}")
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            raise ApiError(f"Quantity for {name} must be a number.")
+        value = int(amount)
+        if value < 0 or value > MAX_RESOURCE_QUANTITY:
+            raise ApiError(f"Quantity for {name} must be between 0 and {MAX_RESOURCE_QUANTITY}.")
+        quantities[name] = value
+    return quantities
 
 
 def validate_request_payload(raw: object) -> dict:
@@ -393,11 +647,35 @@ def validate_request_payload(raw: object) -> dict:
         if value not in resources:
             resources.append(value)
 
+    # Quantities are optional; the form used to send categories only. A category
+    # with a quantity is always part of requiredResources as well.
+    quantities_raw = field("resourceQuantities")
+    if quantities_raw is None:
+        quantities_raw = {}
+    if not isinstance(quantities_raw, dict) or len(quantities_raw) > len(RESOURCE_CATEGORIES):
+        raise ApiError("Resource quantities must be an object of category: amount pairs.")
+    quantities: dict[str, int] = {}
+    for category, amount in quantities_raw.items():
+        name = str(category).strip()
+        if name not in RESOURCE_CATEGORIES:
+            raise ApiError(f"Unknown resource category: {name}")
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            raise ApiError(f"Quantity for {name} must be a number.")
+        value = int(amount)
+        if value < 0 or value > MAX_RESOURCE_QUANTITY:
+            raise ApiError(f"Quantity for {name} must be between 0 and {MAX_RESOURCE_QUANTITY}.")
+        if value == 0:
+            continue
+        quantities[name] = value
+        if name not in resources:
+            resources.append(name)
+
     return {
         "type": disaster_type,
         "severity": severity,
         "affectedPeople": affected_int,
         "requiredResources": resources,
+        "resourceQuantities": quantities,
         "locationName": html.escape(location, quote=False),
         "latitude": float(latitude),
         "longitude": float(longitude),
@@ -587,6 +865,14 @@ class DrrasHandler(SimpleHTTPRequestHandler):
             return
         self._route_patch(self.path.split("?", 1)[0])
 
+    def do_PUT(self) -> None:  # noqa: N802
+        try:
+            self.drain_body()
+        except ApiError as err:
+            self._send_json({"error": err.message}, err.status)
+            return
+        self._route_put(self.path.split("?", 1)[0])
+
     def end_headers(self) -> None:
         # Entry documents must always revalidate: a cached admin.html keeps
         # pointing at an old admin.js, and the page then behaves like the fix
@@ -619,7 +905,7 @@ class DrrasHandler(SimpleHTTPRequestHandler):
                 self._require_admin()
                 self._send_json({"requests": self.store.list_requests()})
                 return
-                        if path.startswith("/api/admin/requests/"):
+            if path.startswith("/api/admin/requests/"):
                 self._require_admin()
                 request_id = unquote(path.rsplit("/", 1)[-1])
                 record = self.store.get_request(request_id)
@@ -634,6 +920,15 @@ class DrrasHandler(SimpleHTTPRequestHandler):
                 if record is None:
                     raise ApiError("That request was not found.", HTTPStatus.NOT_FOUND)
                 self._send_json({"request": record})
+                return
+            # Public endpoint: supplies currently on hand (lets the form show
+            # what is actually available before someone asks for more).
+            if path == "/api/inventory":
+                self._send_json({"inventory": self.store.get_inventory()})
+                return
+            if path == "/api/admin/inventory":
+                self._require_admin()
+                self._send_json({"inventory": self.store.get_inventory()})
                 return
             raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
         except ApiError as err:
@@ -709,7 +1004,23 @@ class DrrasHandler(SimpleHTTPRequestHandler):
             status = str(body.get("status") or "").strip().lower()
             if status not in ("accepted", "rejected"):
                 raise ApiError("Status must be 'accepted' or 'rejected'.")
-            self._send_json({"request": self.store.set_request_status(request_id, status)})
+            message = validate_decision_message(body.get("message"))
+            self._send_json(
+                {"request": self.store.set_request_status(request_id, status, message)}
+            )
+        except ApiError as err:
+            self._send_json({"error": err.message}, err.status)
+
+    # ---- API: inventory ----
+
+    def _route_put(self, path: str) -> None:
+        try:
+            self._require_admin()
+            self._require_csrf()
+            if path != "/api/admin/inventory":
+                raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
+            quantities = validate_inventory_payload(self._read_json())
+            self._send_json({"inventory": self.store.set_inventory(quantities)})
         except ApiError as err:
             self._send_json({"error": err.message}, err.status)
 

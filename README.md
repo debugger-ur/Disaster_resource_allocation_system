@@ -104,7 +104,9 @@ The system is organized into four core-system modules sitting between input sour
 
 ## Web Admin Module: Request Review
 
-A password-protected web admin module is available at `/admin`. The public relief-request form now posts to the same server-side API, so submissions from different browsers are visible in one dashboard. New requests start as `pending`; an admin can accept or reject them, and each decision is stored with a timestamp.
+A password-protected web admin module is available at `/admin`. The public relief-request form now posts to the same server-side API, so submissions from different browsers are visible in one dashboard. New requests start as `pending`; an admin can accept or reject them, and each decision is stored with a timestamp and a **message delivered to the user** (the admin writes one, or a sensible default is recorded). The user reads it back on the public "Track Your Request" form with their Request ID.
+
+The form also accepts **quantities per resource category**, checked against the supplies on hand (`inventory` in SQLite). If the ask is beyond current stock ("off the limits") and the situation is `CRITICAL`, the request is granted at least the supplies present at that moment and the user is told exactly how much — *"this much only can be provided at the moment"* — with the rest left for when supplies are replenished. Non-critical over-limit asks are flagged for admin review instead of being auto-granted. Accepting a request allocates the delivered amounts from current stock (never below zero).
 
 ### Run locally
 
@@ -122,10 +124,13 @@ Open `http://localhost:8000/` for the public site and `http://localhost:8000/adm
 
 ### Routes and protection
 
-- `POST /api/requests` — validates and saves a public request as pending.
+- `POST /api/requests` — validates and saves a public request as pending. Optional `resourceQuantities` (`{"Supply": 50, ...}`) is checked against current stock; the response carries `grantedResources` and, when stock limited the ask, a `userMessage` for the user.
+- `GET /api/requests/{id}` — public status check; returns the request including `userMessage` and `decisionMessage` (the note recorded with the admin's accept/reject).
+- `GET /api/inventory` — public: supplies currently on hand per resource category.
 - `POST /api/admin/login` — verifies the configured password and issues an opaque, server-side session cookie.
 - `GET /api/admin/session` and `GET /api/admin/requests` — require a valid admin session.
-- `PATCH /api/admin/requests/{id}` with `{"status":"accepted"}` or `{"status":"rejected"}` — requires the admin session and a CSRF token; a request can only be reviewed once.
+- `PATCH /api/admin/requests/{id}` with `{"status":"accepted"}` or `{"status":"rejected"}` and an optional `{"message":"..."}` — requires the admin session and a CSRF token; a request can only be reviewed once. The message (or a default one) is stored for the user; accepting also allocates the requested quantities from stock (capped at what is on hand) and records the delivered amounts in `grantedResources`.
+- `GET /api/admin/inventory` / `PUT /api/admin/inventory` with `{"quantities":{"Supply":500}}` — view or adjust the stock levels (admin session + CSRF required for the update).
 - `POST /api/admin/logout` — revokes the session.
 
 Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes, not in the browser or source. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, expire after eight hours, and admin mutations require a CSRF token. Login attempts are rate-limited. This small `http.server` implementation is a starter/demo, not a hardened public production server. Before public deployment, port the handlers to a production-grade application server (or a hardened gateway with strict request limits), use HTTPS and set `DRRAS_COOKIE_SECURE=1`, serve `/` and `/api` on the same origin, and configure backups/monitoring. A static-only host such as GitHub Pages cannot run this Python API by itself; the frontend degrades to demo mode there (see Deployment).

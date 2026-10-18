@@ -25,11 +25,30 @@ export const config = {
 
 const DEMO_REQUESTS_KEY = "drras_requests";
 const DEMO_SESSION_KEY = "drras_demo_admin";
+const DEMO_INVENTORY_KEY = "drras_inventory";
 const PROBE_TIMEOUT_MS = 2000;
 
 const DISASTER_TYPES = ["FLOOD", "EARTHQUAKE", "FIRE", "LANDSLIDE", "INDUSTRIAL_ACCIDENT", "OTHER"];
 const SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 const RESOURCE_CATEGORIES = ["Ambulance", "RescueTeam", "MedicalTeam", "Equipment", "Supply"];
+const MAX_RESOURCE_QUANTITY = 1_000_000_000;
+const MESSAGE_MAX_LENGTH = 1000;
+
+// Mirrors DEFAULT_INVENTORY / the default decision messages in backend/admin_server.py.
+const DEFAULT_INVENTORY = {
+  Ambulance: 3,
+  RescueTeam: 18,
+  MedicalTeam: 5,
+  Equipment: 2,
+  Supply: 1500,
+};
+const DEFAULT_DECISION_MESSAGES = {
+  accepted:
+    "Your relief request has been ACCEPTED by the command center. Relief units are being dispatched to your location. Please stay in a safe, accessible area and keep your communication line open.",
+  rejected:
+    "Your relief request has been reviewed and REJECTED by the command center. This typically happens when the zone is already covered by ongoing operations or the request was merged with a duplicate. If you are in immediate danger, please contact local emergency services (112).",
+};
+export { DEFAULT_DECISION_MESSAGES };
 
 export class ServiceError extends Error {
   constructor(message, status = 0) {
@@ -83,6 +102,26 @@ function writeDemoRequests(rows) {
   }
 }
 
+// Demo-mode stock of supplies. Seeded from the same defaults the server uses.
+function readDemoInventory() {
+  try {
+    const raw = storage().getItem(DEMO_INVENTORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed === "object") return { ...DEFAULT_INVENTORY, ...parsed };
+  } catch {
+    /* fall through to defaults */
+  }
+  return { ...DEFAULT_INVENTORY };
+}
+
+function writeDemoInventory(inventory) {
+  try {
+    storage().setItem(DEMO_INVENTORY_KEY, JSON.stringify(inventory));
+  } catch (err) {
+    throw new ServiceError(`This browser could not save the inventory (${err?.name || "error"}).`, 500);
+  }
+}
+
 function newRequestId() {
   const bytes = new Uint8Array(4);
   if (typeof globalThis.crypto?.getRandomValues === "function") {
@@ -125,7 +164,88 @@ export function validateRequestPayload(raw) {
     if (!requiredResources.includes(value)) requiredResources.push(value);
   }
 
-  return { type, severity, affectedPeople: Math.trunc(affected), requiredResources, locationName, latitude, longitude };
+  // Quantities are optional (the form used to send categories only). A category
+  // with a quantity always lands in requiredResources as well.
+  const quantitiesRaw = raw.resourceQuantities ?? {};
+  if (typeof quantitiesRaw !== "object" || Array.isArray(quantitiesRaw)) {
+    throw new ServiceError("Resource quantities must be an object of category: amount pairs.");
+  }
+  const resourceQuantities = {};
+  for (const [category, amount] of Object.entries(quantitiesRaw)) {
+    const name = String(category).trim();
+    if (!RESOURCE_CATEGORIES.includes(name)) throw new ServiceError(`Unknown resource category: ${name}`);
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value < 0 || value > MAX_RESOURCE_QUANTITY) {
+      throw new ServiceError(`Quantity for ${name} must be a number between 0 and ${MAX_RESOURCE_QUANTITY}.`);
+    }
+    const quantity = Math.trunc(value);
+    if (quantity === 0) continue;
+    resourceQuantities[name] = quantity;
+    if (!requiredResources.includes(name)) requiredResources.push(name);
+  }
+
+  return {
+    type,
+    severity,
+    affectedPeople: Math.trunc(affected),
+    requiredResources,
+    resourceQuantities,
+    locationName,
+    latitude,
+    longitude,
+  };
+}
+
+/** Mirrors plan_submission_grant() in backend/admin_server.py: what the user is
+ *  promised the moment they ask, given the supplies on hand right now. */
+export function planSubmissionGrant(requested, available, severity) {
+  const entries = Object.entries(requested || {});
+  if (entries.length === 0) return { granted: {}, message: null };
+  const short = entries.filter(([category, quantity]) => quantity > (available[category] || 0));
+  if (short.length === 0) return { granted: { ...requested }, message: null };
+  if (severity === "CRITICAL") {
+    const granted = {};
+    for (const [category, quantity] of entries) {
+      const amount = Math.min(quantity, available[category] || 0);
+      if (amount > 0) granted[category] = amount;
+    }
+    const detail = short
+      .map(([category, quantity]) => `${granted[category] || 0} of ${quantity} ${category} (in stock now: ${available[category] || 0})`)
+      .join("; ");
+    return {
+      granted,
+      message:
+        `Critical situation: the supplies you asked for are beyond the limits of what is in stock right now. ` +
+        `You are guaranteed at least the supplies present at this moment: ${detail}. ` +
+        `In other words, this much only can be provided at the moment; the rest will be dispatched when supplies are replenished.`,
+    };
+  }
+  const detail = short
+    .map(([category, quantity]) => `${category}: asked ${quantity}, in stock ${available[category] || 0}`)
+    .join("; ");
+  return {
+    granted: {},
+    message:
+      `The supplies you asked for are beyond the limits of what is in stock right now (${detail}). ` +
+      `Your request has been flagged for admin review; an admin will decide what can be provided at the moment.`,
+  };
+}
+
+function escapeText(value) {
+  return String(value).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+}
+
+/** Mirrors validate_decision_message() in backend/admin_server.py: trims and
+ *  length-checks the admin note. The server escapes HTML on store; the demo
+ *  path calls escapeText() itself so both modes persist the same shape. */
+export function sanitizeDecisionMessage(raw) {
+  if (raw === undefined || raw === null) return null;
+  const text = String(raw).trim();
+  if (!text) return null;
+  if (text.length > MESSAGE_MAX_LENGTH) {
+    throw new ServiceError(`Message is too long (max ${MESSAGE_MAX_LENGTH} characters).`);
+  }
+  return text;
 }
 
 // ---- mode detection ----
@@ -211,8 +331,16 @@ export async function submitRequest(payload) {
     return { request: result.request, mode };
   }
   const record = validateRequestPayload(payload);
+  const { granted, message } = planSubmissionGrant(
+    record.resourceQuantities,
+    readDemoInventory(),
+    record.severity,
+  );
   const row = {
     ...record,
+    grantedResources: granted,
+    userMessage: message,
+    decisionMessage: null,
     id: newRequestId(),
     status: "pending",
     submittedAt: new Date().toISOString(),
@@ -282,8 +410,9 @@ export async function listRequests() {
   return { requests: Array.isArray(result.requests) ? result.requests : [], mode, demo: false };
 }
 
-export async function decideRequest(id, status, csrf) {
+export async function decideRequest(id, status, csrf, message = null) {
   const mode = await detectMode();
+  const cleanMessage = sanitizeDecisionMessage(message);
   if (mode === "demo") {
     const rows = readDemoRequests();
     const index = rows.findIndex((row) => row.id === id);
@@ -291,12 +420,72 @@ export async function decideRequest(id, status, csrf) {
     if (rows[index].status !== "pending") {
       throw new ServiceError(`Request ${id} was already ${rows[index].status}.`, 409);
     }
-    rows[index] = { ...rows[index], status, decidedAt: new Date().toISOString() };
+    const row = rows[index];
+    let decisionMessage = (cleanMessage ? escapeText(cleanMessage) : null)
+      || DEFAULT_DECISION_MESSAGES[status]
+      || DEFAULT_DECISION_MESSAGES.rejected;
+    let granted = {};
+    if (status === "accepted") {
+      const inventory = readDemoInventory();
+      const requested = row.resourceQuantities || {};
+      for (const [category, quantity] of Object.entries(requested)) {
+        const delivered = Math.min(quantity, inventory[category] || 0);
+        if (delivered > 0) {
+          granted[category] = delivered;
+          inventory[category] = (inventory[category] || 0) - delivered;
+        }
+      }
+      writeDemoInventory(inventory);
+      const short = Object.entries(requested).filter(([category, quantity]) => (granted[category] || 0) < quantity);
+      if (short.length > 0) {
+        const detail = short.map(([category, quantity]) => `${granted[category] || 0} of ${quantity} ${category}`).join("; ");
+        decisionMessage += ` Supplies note: only the stock at this moment could be provided — ${detail}; this much only can be provided at the moment. The remainder follows when supplies are replenished.`;
+      }
+    }
+    rows[index] = {
+      ...row,
+      status,
+      grantedResources: granted,
+      decisionMessage,
+      decidedAt: new Date().toISOString(),
+    };
     writeDemoRequests(rows);
     return { request: rows[index], mode, demo: true };
   }
-  const result = await request("PATCH", `/api/admin/requests/${encodeURIComponent(id)}`, { status }, { csrf, token: bearerToken() });
+  const body = cleanMessage ? { status, message: cleanMessage } : { status };
+  const result = await request("PATCH", `/api/admin/requests/${encodeURIComponent(id)}`, body, { csrf, token: bearerToken() });
   return { request: result.request, mode, demo: false };
+}
+
+/** Public status check: the user looks up their own request by ID and reads the
+ *  allocation note and the admin's decision message. */
+export async function getRequestStatus(id) {
+  const mode = await detectMode();
+  if (mode === "unavailable") {
+    throw new ServiceError("The request service is not reachable, and demo fallback is disabled.", 503);
+  }
+  const requestId = String(id || "").trim();
+  if (!requestId) throw new ServiceError("Enter your Request ID (e.g. REQ-1A2B3C4D).");
+  if (mode === "demo") {
+    const row = readDemoRequests().find((item) => item.id.toUpperCase() === requestId.toUpperCase());
+    if (!row) throw new ServiceError("That request was not found in this browser.", 404);
+    return { request: row, mode, demo: true };
+  }
+  const result = await request("GET", `/api/requests/${encodeURIComponent(requestId)}`);
+  return { request: result.request, mode, demo: false };
+}
+
+/** Supplies currently on hand per category ("at this moment"). */
+export async function fetchInventory() {
+  const mode = await detectMode();
+  if (mode === "demo") return { inventory: readDemoInventory(), mode, demo: true };
+  if (mode === "unavailable") return { inventory: { ...DEFAULT_INVENTORY }, mode, demo: false };
+  try {
+    const result = await request("GET", "/api/inventory");
+    return { inventory: result.inventory || {}, mode, demo: false };
+  } catch {
+    return { inventory: { ...DEFAULT_INVENTORY }, mode, demo: false };
+  }
 }
 
 export async function logout(csrf) {

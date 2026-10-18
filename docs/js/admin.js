@@ -16,6 +16,7 @@ import {
   login,
   logout,
   sessionState,
+  DEFAULT_DECISION_MESSAGES,
 } from "./requestService.js";
 
 let csrfToken = null;
@@ -125,13 +126,20 @@ function renderRequests() {
     );
 
     const resourcesCell = element("td");
-    resourcesCell.append(
-      element(
-        "div",
-        "resource-list",
-        request.requiredResources?.length ? request.requiredResources.join(", ") : "No specific resources",
-      ),
-    );
+    const quantities = request.resourceQuantities || {};
+    const granted = request.grantedResources || {};
+    const resourcesText = request.requiredResources?.length
+      ? request.requiredResources.map((category) => {
+          const asked = quantities[category];
+          const given = granted[category];
+          if (!asked) return category;
+          return given !== undefined ? `${category} × ${asked} → ${given}` : `${category} × ${asked}`;
+        }).join(", ")
+      : "No specific resources";
+    resourcesCell.append(element("div", "resource-list", resourcesText));
+    if (request.userMessage) {
+      resourcesCell.append(element("div", "user-message-note", `To user: ${request.userMessage}`));
+    }
 
     const submittedCell = element("td");
     submittedCell.append(element("div", "submitted-time", formatDate(request.submittedAt)));
@@ -142,6 +150,9 @@ function renderRequests() {
     );
     if (request.decidedAt) {
       decisionCell.append(element("div", "reviewed-note", `Reviewed ${formatDate(request.decidedAt)}`));
+    }
+    if (request.decisionMessage) {
+      decisionCell.append(element("div", "decision-message-note", `To user: ${request.decisionMessage}`));
     }
 
     const actionsCell = element("td", "action-cell");
@@ -217,28 +228,68 @@ document.getElementById("refreshButton").addEventListener("click", async (event)
   }
 });
 
-requestRows.addEventListener("click", async (event) => {
+// ---- decision dialog: every accept/reject ships with a message to the user ----
+
+const decisionDialog = document.getElementById("decisionDialog");
+const decisionDialogTitle = document.getElementById("decisionDialogTitle");
+const decisionDialogIntro = document.getElementById("decisionDialogIntro");
+const decisionMessageInput = document.getElementById("decisionMessage");
+const decisionConfirm = document.getElementById("decisionConfirm");
+const decisionCancel = document.getElementById("decisionCancel");
+const decisionError = document.getElementById("decisionError");
+let pendingDecision = null;
+
+function openDecisionDialog(request, action) {
+  pendingDecision = { request, action };
+  const accepting = action === "accepted";
+  decisionDialogTitle.textContent = accepting
+    ? `Accept request ${request.id}`
+    : `Reject request ${request.id}`;
+  decisionDialogIntro.textContent = accepting
+    ? "The request will be marked accepted. The message below is delivered to the user with your decision."
+    : "The request will be marked rejected. The message below is delivered to the user with your decision.";
+  decisionMessageInput.value = DEFAULT_DECISION_MESSAGES[action] || "";
+  decisionError.textContent = "";
+  if (typeof decisionDialog.showModal === "function") decisionDialog.showModal();
+  else decisionDialog.setAttribute("open", "");
+}
+
+function closeDecisionDialog() {
+  pendingDecision = null;
+  if (typeof decisionDialog.close === "function") decisionDialog.close();
+  else decisionDialog.removeAttribute("open");
+}
+
+decisionCancel.addEventListener("click", closeDecisionDialog);
+
+decisionConfirm.addEventListener("click", async () => {
+  if (!pendingDecision) return;
+  const { request, action } = pendingDecision;
+  decisionConfirm.disabled = true;
+  decisionError.textContent = "";
+  dashboardMessage.textContent = "";
+  try {
+    await decideRequest(request.id, action, csrfToken, decisionMessageInput.value);
+    closeDecisionDialog();
+    await loadRequests();
+  } catch (error) {
+    if (error.status === 401) {
+      closeDecisionDialog();
+      showLogin(sessionLostMessage());
+    } else {
+      decisionError.textContent = error.message;
+    }
+  } finally {
+    decisionConfirm.disabled = false;
+  }
+});
+
+requestRows.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action][data-request-id]");
   if (!button || button.disabled) return;
   const request = requests.find((item) => item.id === button.dataset.requestId);
   if (!request || request.status !== "pending") return;
-
-  const action = button.dataset.action;
-  if (action === "rejected" && !window.confirm(`Reject request ${request.id}?`)) return;
-
-  const rowButtons = button.closest("tr").querySelectorAll("button");
-  rowButtons.forEach((item) => { item.disabled = true; });
-  dashboardMessage.textContent = "";
-  try {
-    await decideRequest(request.id, action, csrfToken);
-    await loadRequests();
-  } catch (error) {
-    if (error.status === 401) showLogin(sessionLostMessage());
-    else {
-      await loadRequests().catch(() => {});
-      dashboardMessage.textContent = error.message;
-    }
-  }
+  openDecisionDialog(request, button.dataset.action);
 });
 
 document.getElementById("logoutButton").addEventListener("click", async (event) => {

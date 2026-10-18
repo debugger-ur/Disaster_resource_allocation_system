@@ -57,16 +57,45 @@
       <label>Longitude <input type="number" step="any" id="dLon" min="-180" max="180" required></label>
       <fieldset class="checkbox-group">
         <legend>Required Resources</legend>
-        <label><input type="checkbox" value="Ambulance"> Ambulance</label>
-        <label><input type="checkbox" value="RescueTeam"> Rescue Team</label>
-        <label><input type="checkbox" value="MedicalTeam"> Medical Team</label>
-        <label><input type="checkbox" value="Equipment"> Equipment</label>
-        <label><input type="checkbox" value="Supply"> Supply</label>
+        <label class="resource-option">
+          <input type="checkbox" value="Ambulance"> Ambulance
+          <input type="number" class="res-qty" data-category="Ambulance" min="0" step="1" placeholder="Qty">
+          <span class="stock-hint" data-category="Ambulance">in stock: —</span>
+        </label>
+        <label class="resource-option">
+          <input type="checkbox" value="RescueTeam"> Rescue Team
+          <input type="number" class="res-qty" data-category="RescueTeam" min="0" step="1" placeholder="Qty">
+          <span class="stock-hint" data-category="RescueTeam">in stock: —</span>
+        </label>
+        <label class="resource-option">
+          <input type="checkbox" value="MedicalTeam"> Medical Team
+          <input type="number" class="res-qty" data-category="MedicalTeam" min="0" step="1" placeholder="Qty">
+          <span class="stock-hint" data-category="MedicalTeam">in stock: —</span>
+        </label>
+        <label class="resource-option">
+          <input type="checkbox" value="Equipment"> Equipment
+          <input type="number" class="res-qty" data-category="Equipment" min="0" step="1" placeholder="Qty">
+          <span class="stock-hint" data-category="Equipment">in stock: —</span>
+        </label>
+        <label class="resource-option">
+          <input type="checkbox" value="Supply"> Supply
+          <input type="number" class="res-qty" data-category="Supply" min="0" step="1" placeholder="Qty">
+          <span class="stock-hint" data-category="Supply">in stock: —</span>
+        </label>
       </fieldset>
+      <p class="request-note">If you ask for more than the supplies in stock right now and the situation is <b>CRITICAL</b>, you are guaranteed at least the supplies present at that moment — and you will get a message telling you exactly how much that is.</p>
       <button type="submit" class="btn btn-primary">Submit Request</button>
     </form>
 
     <div id="disasterReportResult"></div>
+
+    <h2>Track Your Request</h2>
+    <p class="request-note">Enter the Request ID you received to see the latest status, the supplies that can be provided, and any message from the command center (accept / reject decisions included).</p>
+    <form id="trackForm" class="form-grid track-form">
+      <label>Request ID <input type="text" id="trackRequestId" placeholder="REQ-1A2B3C4D" required></label>
+      <button type="submit" class="btn btn-primary">Check status</button>
+    </form>
+    <div id="trackResult"></div>
 
     <h2>Operational Demo Disasters</h2>
     <p class="request-note">These sample operational records remain in this browser's local storage. Incoming public requests are reviewed separately in the <a href="admin.html">Admin dashboard</a>.</p>

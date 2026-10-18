@@ -8,7 +8,7 @@ import { RouteManager } from "./routeManager.js";
 import { sortByDistance } from "./distanceCalculator.js";
 import { seedDisasters, seedResources, seedHospitals, seedShelters } from "./seedData.js";
 import { clearAll } from "./storage.js";
-import { bannerText, submitRequest } from "./requestService.js";
+import { bannerText, submitRequest, getRequestStatus, fetchInventory } from "./requestService.js";
 import * as ui from "./ui.js";
 
 // ---- Initialize managers ----
@@ -77,11 +77,22 @@ ui.el("disasterForm").addEventListener("submit", async (e) => {
   submitButton.textContent = "Submitting…";
 
   try {
+    const requiredResources = [];
+    const resourceQuantities = {};
+    for (const checkbox of document.querySelectorAll("#disasterForm .checkbox-group input[type='checkbox']")) {
+      const qtyInput = document.querySelector(`#disasterForm .res-qty[data-category="${checkbox.value}"]`);
+      const quantity = qtyInput ? Number(qtyInput.value) : NaN;
+      if (checkbox.checked) requiredResources.push(checkbox.value);
+      if (checkbox.checked && Number.isFinite(quantity) && quantity >= 1) {
+        resourceQuantities[checkbox.value] = Math.trunc(quantity);
+      }
+    }
     const payload = {
       type: ui.el("dType").value,
       severity: ui.el("dSeverity").value,
       affectedPeople: Number(ui.el("dAffected").value),
-      requiredResources: [...document.querySelectorAll("#disasterForm .checkbox-group input:checked")].map((c) => c.value),
+      requiredResources,
+      resourceQuantities,
       locationName: ui.el("dLocation").value.trim(),
       latitude: Number(ui.el("dLat").value),
       longitude: Number(ui.el("dLon").value),
@@ -99,13 +110,24 @@ ui.el("disasterForm").addEventListener("submit", async (e) => {
       `Review status    : PENDING`,
       `Stored in        : ${result.mode === "server" ? "the shared request database" : "this browser only (no server)"}`,
       `Location         : ${request.locationName}`,
+    ];
+    const granted = request.grantedResources && Object.keys(request.grantedResources).length
+      ? Object.entries(request.grantedResources).map(([category, amount]) => `${amount} ${category}`).join(", ")
+      : "";
+    if (granted) {
+      lines.push(`Supplies granted : ${granted}`);
+    }
+    if (request.userMessage) {
+      lines.push(``, `Message for you  : ${request.userMessage}`);
+    }
+    lines.push(
       ``,
       `Nearest Hospitals:`,
       ...nearestHospitals.map((h, i) => `  ${i + 1}. ${h.item.id} (${h.item.name}) -> ${h.distance.toFixed(1)} km`),
       ``,
       `Nearest Shelters:`,
       ...nearestShelters.map((s, i) => `  ${i + 1}. ${s.item.id} (${s.item.name}) -> ${s.distance.toFixed(1)} km`),
-    ];
+    );
     ui.showDistanceAnalysis(ui.el("disasterReportResult"), "REQUEST SUBMITTED — PENDING ADMIN REVIEW", lines);
     e.target.reset();
   } catch (err) {
@@ -326,11 +348,28 @@ function getStatusDetails(status) {
 
 function renderStatusCard(container, req, details) {
   const status = (req.status || "pending").toLowerCase();
-  const reqRes = Array.isArray(req.requiredResources) && req.requiredResources.length
-    ? req.requiredResources.join(", ")
+  const quantities = req.resourceQuantities || {};
+  const granted = req.grantedResources || {};
+  const requestedText = Array.isArray(req.requiredResources) && req.requiredResources.length
+    ? req.requiredResources.map((category) => {
+        const asked = quantities[category];
+        const given = granted[category];
+        if (!asked) return category;
+        return given !== undefined
+          ? `${category} × ${asked} (provided: ${given})`
+          : `${category} × ${asked}`;
+      }).join(", ")
     : "None";
   const submitted = req.submittedAt ? new Date(req.submittedAt).toLocaleString() : "Recently";
   const decided = req.decidedAt ? new Date(req.decidedAt).toLocaleString() : (status === "pending" ? "Awaiting decision" : "—");
+  // The admin's own note replaces the canned wording when present.
+  const statusMessage = req.decisionMessage || details.message;
+  const allocationNote = req.userMessage
+    ? `<p class="status-allocation-text">📦 <strong>Supplies update:</strong> ${req.userMessage}</p>`
+    : "";
+  const customNote = req.decisionMessage
+    ? `<p class="status-admin-note">✉️ <strong>Message from the command center:</strong> ${req.decisionMessage}</p>`
+    : "";
 
   container.innerHTML = `
     <div class="status-alert ${status}">
@@ -343,12 +382,14 @@ function renderStatusCard(container, req, details) {
         </div>
         <span class="${details.badgeClass}">${details.badgeText}</span>
       </div>
-      <p class="status-message-text"><strong>Status Update:</strong> ${details.message}</p>
+      <p class="status-message-text"><strong>Status Update:</strong> ${statusMessage}</p>
+      ${allocationNote}
+      ${customNote}
       <p class="status-advice-text">👉 <strong>Next Steps:</strong> ${details.advice}</p>
       <div class="request-meta-grid">
         <div class="request-meta-item"><strong>Location</strong><span>${req.locationName || "—"}</span></div>
         <div class="request-meta-item"><strong>Disaster & Severity</strong><span>${req.type || "—"} (${req.severity || "—"})</span></div>
-        <div class="request-meta-item"><strong>Resources Needed</strong><span>${reqRes}</span></div>
+        <div class="request-meta-item"><strong>Resources Needed</strong><span>${requestedText}</span></div>
         <div class="request-meta-item"><strong>Affected People</strong><span>${Number(req.affectedPeople || 0).toLocaleString()}</span></div>
         <div class="request-meta-item"><strong>Submitted</strong><span>${submitted}</span></div>
         <div class="request-meta-item"><strong>Decision Time</strong><span>${decided}</span></div>
@@ -356,3 +397,31 @@ function renderStatusCard(container, req, details) {
     </div>
   `;
 }
+
+// ================= TRACK REQUEST =================
+ui.el("trackForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const resultBox = ui.el("trackResult");
+  const submitButton = e.submitter || e.currentTarget.querySelector('button[type="submit"]');
+  const originalLabel = submitButton.textContent;
+  submitButton.disabled = true;
+  submitButton.textContent = "Checking…";
+  try {
+    const { request } = await getRequestStatus(ui.el("trackRequestId").value);
+    renderStatusCard(resultBox, request, getStatusDetails(request.status));
+  } catch (err) {
+    resultBox.innerHTML = `<div class="status-alert rejected"><p class="status-message-text">${err.message || "That request was not found."}</p></div>`;
+  } finally {
+    submitButton.disabled = false;
+    submitButton.textContent = originalLabel;
+  }
+});
+
+// Show the supplies actually on hand next to the quantity inputs, so people can
+// see the limit before asking for more than exists.
+fetchInventory().then(({ inventory }) => {
+  for (const hint of document.querySelectorAll("#disasterForm .stock-hint")) {
+    const amount = inventory[hint.dataset.category];
+    hint.textContent = amount === undefined ? "in stock: —" : `in stock now: ${Number(amount).toLocaleString()}`;
+  }
+}).catch(() => {});

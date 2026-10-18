@@ -100,3 +100,57 @@ h2 { border-left: 4px solid #b91c1c; padding-left: 10px; margin-top: 30px; }
   padding: 10px 12px; margin: 0 0 14px;
   font-size: 0.85rem; line-height: 1.5; border-radius: 0 4px 4px 0;
 }
+
+/* ---- resource quantities + live stock hints ---- */
+.resource-option {
+  display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; margin-bottom: 4px;
+}
+.res-qty {
+  width: 76px; padding: 3px 6px; border: 1px solid #d1d5db; border-radius: 4px;
+  font-size: 0.82rem;
+}
+.res-qty:disabled { background: #f3f4f6; }
+.stock-hint { color: #6b7280; font-size: 0.75rem; font-weight: normal; }
+
+/* ---- track request form ---- */
+.track-form { max-width: 520px; }
+.track-form button { align-self: end; }
+
+/* ---- status card (track request result) ---- */
+.status-alert {
+  background: #fff; border: 1px solid #e5e7eb; border-left: 6px solid #9ca3af;
+  border-radius: 8px; padding: 16px 18px; margin-top: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.status-alert.accepted { border-left-color: #16a34a; }
+.status-alert.rejected { border-left-color: #dc2626; }
+.status-alert.pending { border-left-color: #d97706; }
+.status-alert-header {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+}
+.status-alert-header h3 { margin: 0 0 4px; font-size: 1.05rem; color: #111827; }
+.status-message-text { margin: 12px 0 0; line-height: 1.55; font-size: 0.92rem; }
+.status-allocation-text {
+  margin: 10px 0 0; padding: 8px 10px; background: #eff6ff; border-left: 4px solid #2563eb;
+  border-radius: 0 4px 4px 0; font-size: 0.88rem; line-height: 1.5;
+}
+.status-admin-note {
+  margin: 10px 0 0; padding: 8px 10px; background: #f0fdf4; border-left: 4px solid #16a34a;
+  border-radius: 0 4px 4px 0; font-size: 0.88rem; line-height: 1.5;
+}
+.status-advice-text { margin: 10px 0 0; font-size: 0.88rem; line-height: 1.5; color: #374151; }
+.status-badge {
+  padding: 4px 10px; border-radius: 999px; font-size: 0.72rem; font-weight: 700;
+  letter-spacing: 0.04em; white-space: nowrap;
+}
+.status-badge.accepted { background: #dcfce7; color: #166534; }
+.status-badge.rejected { background: #fee2e2; color: #991b1b; }
+.status-badge.pending { background: #fef3c7; color: #92400e; }
+.request-meta-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px; margin-top: 14px;
+}
+.request-meta-item {
+  display: flex; flex-direction: column; gap: 2px; background: #f9fafb;
+  border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px 10px; font-size: 0.82rem;
+}
+.request-meta-item strong { color: #6b7280; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; }
