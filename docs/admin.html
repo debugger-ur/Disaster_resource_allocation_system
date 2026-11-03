@@ -1,139 +1,696 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#102a43">
-  <title>Admin · Disaster Relief Resource Allocation System</title>
-  <link rel="stylesheet" href="css/admin.css?v=2">
-  <script type="module" src="js/admin.js?v=2"></script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b1f33">
+<meta name="robots" content="noindex">
+<title>Command centre · DRRAS</title>
+<link rel="stylesheet" href="css/style.css?v=3">
+<link rel="stylesheet" href="css/admin.css?v=3">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 </head>
-<body>
-  <header class="topbar">
-    <a class="brand" href="index.html" aria-label="Back to the DRRAS website">
-      <span class="brand-mark" aria-hidden="true">DR</span>
-      <span>Disaster Relief <span class="brand-muted">/ Admin</span></span>
-    </a>
-    <a class="back-link" href="index.html">Back to public site <span aria-hidden="true">↗</span></a>
-  </header>
+<body class="admin">
+<a class="skip-link" href="#mainContent">Skip to main content</a>
 
-  <main class="page-shell">
-    <section id="loginSection" class="login-layout" aria-labelledby="loginHeading">
-      <p id="serviceBanner" class="mode-banner" hidden></p>
-      <div class="intro-copy">
-        <p class="eyebrow">CONTROL ROOM</p>
-        <h1 id="loginHeading">Admin sign in</h1>
-        <p>Review incoming relief requests and record an acceptance or rejection decision.</p>
-        <div class="security-note">
-          <span class="security-icon" aria-hidden="true">⌑</span>
-          <span>Admin actions are protected by a server-side session. Your password is never stored in this page.</span>
+<svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
+  <defs>
+    <symbol id="i-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 2 .7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.5c.9.3 1.9.6 2.8.7a2 2 0 0 1 1.8 2.1Z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m20 6-11 11-5-5"/></symbol>
+    <symbol id="i-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></symbol>
+    <symbol id="i-x-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8h.01"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+    <symbol id="i-inbox" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 14h4l2 3h4l2-3h4"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+    <symbol id="i-map" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 3-6 3v15l6-3 6 3 6-3V3l-6 3-6-3Z"/><path d="M9 3v15M15 6v15"/></symbol>
+    <symbol id="i-building" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16"/><path d="M16 9h2a2 2 0 0 1 2 2v10M2 21h20"/><path d="M8 7h4M8 11h4M8 15h4"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14 21 3"/></symbol>
+    <symbol id="i-mail" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 7 10 6 10-6"/></symbol>
+    <symbol id="i-nav" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11 22 2l-9 19-2-8-8-2Z"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></symbol>
+    <symbol id="i-merge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v5a4 4 0 0 0 4 4h8"/><path d="m17 9 3 3-3 3"/><path d="M8 21v-5a4 4 0 0 1 4-4"/><path d="M5 3h6M5 21h6"/></symbol>
+    <symbol id="i-flag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4c4-3 8 3 12 0v10c-4 3-8-3-12 0"/></symbol>
+    <symbol id="i-truck" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 3h15v13H1z"/><path d="M16 8h4l3 3v5h-7"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></symbol>
+  </defs>
+</svg>
+
+<!-- ================= LOGIN ================= -->
+<section class="login-shell" id="loginView">
+  <aside class="login-intro">
+    <div>
+      <a class="brand" href="index.html">
+        <span class="brand__mark" aria-hidden="true">DR</span>
+        <span class="brand__text">DRRAS <small>Command centre</small></span>
+      </a>
+      <h1>Verify reports. Allocate relief. Keep a record.</h1>
+      <p>Every incoming request is checked for duplicates and risk signals before it reaches this desk. Nothing is rejected automatically.</p>
+      <div class="login-intro__points">
+        <div class="login-intro__point">
+          <svg width="17" height="17" aria-hidden="true"><use href="#i-shield"/></svg>
+          <span>Server-side sessions, CSRF protection and role-based access.</span>
+        </div>
+        <div class="login-intro__point">
+          <svg width="17" height="17" aria-hidden="true"><use href="#i-info"/></svg>
+          <span>Full audit trail: who approved or rejected what, when, and why.</span>
+        </div>
+        <div class="login-intro__point">
+          <svg width="17" height="17" aria-hidden="true"><use href="#i-nav"/></svg>
+          <span>Nearest-centre recommendations using road distance and live stock.</span>
         </div>
       </div>
-      <form id="loginForm" class="login-card" autocomplete="on">
-        <div class="card-icon" aria-hidden="true">↗</div>
-        <h2>Welcome back</h2>
-        <p class="muted">Enter the admin password to continue.</p>
-        <label for="adminPassword">Admin password</label>
-        <input id="adminPassword" name="password" type="password" autocomplete="current-password"
-               minlength="12" maxlength="1024" required>
-        <button id="loginButton" class="button button-primary button-wide" type="submit">Sign in</button>
-        <p id="loginMessage" class="message" role="alert" aria-live="polite"></p>
-        <p class="login-help">Server-backed: the operator sets this with --set-password. Static hosting (Pages): the page uses the demo passphrase in requestService.js, which is a formality, not protection.</p>
+    </div>
+    <div class="login-intro__foot">
+      <span>DRRAS · Disaster Relief Resource Allocation System</span>
+      <a href="index.html" style="color:#a9c6e2">← Back to the public site</a>
+    </div>
+  </aside>
+  <div class="login-panel">
+    <div class="login-card">
+      <p class="eyebrow">Restricted area</p>
+      <h2 class="mt-8">Sign in to the command centre</h2>
+      <p class="muted">Use the administrator or operator password configured on the server.</p>
+      <form id="loginForm" autocomplete="on">
+        <div class="field">
+          <label for="adminPassword">Password</label>
+          <input class="input" id="adminPassword" name="password" type="password" autocomplete="current-password" minlength="12" maxlength="1024" required>
+        </div>
+        <p class="login-error" id="loginMessage" role="alert" aria-live="polite"></p>
+        <button class="btn btn--primary btn--block" id="loginButton" type="submit">
+          Sign in
+          <svg class="btn__icon" aria-hidden="true"><use href="#i-arrow"/></svg>
+        </button>
       </form>
-    </section>
-
-    <section id="dashboardSection" hidden aria-labelledby="dashboardHeading">
-      <div class="dashboard-heading">
-        <div>
-          <p class="eyebrow">REQUEST OPERATIONS</p>
-          <h1 id="dashboardHeading">Request dashboard</h1>
-          <p class="muted">Review submissions from the public request form. Decisions are saved centrally.</p>
-        </div>
-        <div class="heading-actions">
-          <button id="refreshButton" class="button button-quiet" type="button">↻ <span>Refresh</span></button>
-          <button id="logoutButton" class="button button-quiet" type="button">Sign out</button>
-        </div>
+      <div class="login-meta">
+        <span id="serviceStatus">Checking the service…</span>
+        <span>Set a password: <code>python3 backend/admin_server.py --set-password</code></span>
       </div>
+    </div>
+  </div>
+</section>
 
-      <div class="summary-grid" aria-label="Request totals">
-        <article class="summary-card summary-pending">
-          <span class="summary-label">Pending</span>
-          <strong id="pendingCount">0</strong>
-          <span class="summary-caption">Awaiting review</span>
-        </article>
-        <article class="summary-card summary-accepted">
-          <span class="summary-label">Accepted</span>
-          <strong id="acceptedCount">0</strong>
-          <span class="summary-caption">Approved by admin</span>
-        </article>
-        <article class="summary-card summary-rejected">
-          <span class="summary-label">Rejected</span>
-          <strong id="rejectedCount">0</strong>
-          <span class="summary-caption">Declined by admin</span>
-        </article>
-        <article class="summary-card summary-total">
-          <span class="summary-label">All requests</span>
-          <strong id="totalCount">0</strong>
-          <span class="summary-caption">Across all statuses</span>
-        </article>
+<!-- ================= APP ================= -->
+<div class="app" id="appView" hidden>
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+  <aside class="sidebar" id="sidebar" aria-label="Command centre navigation">
+    <div class="sidebar__brand">
+      <a class="brand" href="index.html">
+        <span class="brand__mark" aria-hidden="true">DR</span>
+        <span class="brand__text">DRRAS <small>Command centre</small></span>
+      </a>
+    </div>
+    <nav class="sidebar__nav">
+      <p class="sidebar__label">Operations</p>
+      <button class="sidebar__link" type="button" data-view="overview" aria-current="page">
+        <svg aria-hidden="true"><use href="#i-grid"/></svg> Overview
+      </button>
+      <button class="sidebar__link" type="button" data-view="queue">
+        <svg aria-hidden="true"><use href="#i-inbox"/></svg> Verification queue
+        <span class="sidebar__count" id="navQueueCount">0</span>
+      </button>
+      <button class="sidebar__link" type="button" data-view="requests">
+        <svg aria-hidden="true"><use href="#i-list"/></svg> All requests
+      </button>
+      <button class="sidebar__link" type="button" data-view="map">
+        <svg aria-hidden="true"><use href="#i-map"/></svg> Operations map
+      </button>
+      <p class="sidebar__label">Resources</p>
+      <button class="sidebar__link" type="button" data-view="centres">
+        <svg aria-hidden="true"><use href="#i-building"/></svg> Help centres
+      </button>
+      <button class="sidebar__link" type="button" data-view="audit">
+        <svg aria-hidden="true"><use href="#i-history"/></svg> Audit log
+      </button>
+      <button class="sidebar__link" type="button" data-view="settings">
+        <svg aria-hidden="true"><use href="#i-settings"/></svg> Settings
+      </button>
+    </nav>
+    <div class="sidebar__foot">
+      <div class="sidebar__user">
+        <span class="avatar" id="userAvatar">AD</span>
+        <span><strong id="userRole">Administrator</strong><span id="userScope">Full access</span></span>
       </div>
+      <span class="tiny">Data: <span id="sidebarDatabase">server database</span></span>
+    </div>
+  </aside>
 
-      <section class="requests-panel" aria-labelledby="requestsHeading">
-        <div class="panel-heading">
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn menu-btn" id="menuButton" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
+        <svg width="19" height="19" aria-hidden="true"><use href="#i-menu"/></svg>
+      </button>
+      <div>
+        <div class="topbar__title" id="pageTitle">Overview</div>
+        <div class="topbar__sub" id="pageSub">Live operational snapshot</div>
+      </div>
+      <div class="topbar__actions">
+        <span class="badge badge--neutral" id="roleBadge">Admin</span>
+        <button class="btn btn--secondary btn--sm" id="refreshButton" type="button">
+          <svg class="btn__icon" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh
+        </button>
+        <button class="btn btn--ghost btn--sm" id="logoutButton" type="button">
+          <svg class="btn__icon" aria-hidden="true"><use href="#i-logout"/></svg> Sign out
+        </button>
+      </div>
+    </header>
+
+    <main class="content" id="mainContent">
+      <div id="appBanner"></div>
+
+      <!-- OVERVIEW -->
+      <section class="admin-view" id="viewOverview" data-view="overview">
+        <div class="view-head">
           <div>
-            <h2 id="requestsHeading">Submitted requests</h2>
-            <p id="requestCount" class="muted">Loading requests…</p>
+            <h1>Command centre</h1>
+            <p>Verification, approval and resource status across the district.</p>
           </div>
-          <label class="filter-control" for="statusFilter">
-            <span>Status</span>
-            <select id="statusFilter">
-              <option value="all">All requests</option>
-              <option value="pending">Pending</option>
-              <option value="accepted">Accepted</option>
-              <option value="rejected">Rejected</option>
-            </select>
-          </label>
+          <div class="flex" style="gap:8px">
+            <span class="badge badge--neutral badge--lg" id="lastUpdated">Not loaded</span>
+            <button class="btn btn--primary btn--sm" id="openQueueButton" type="button">Review queue
+              <svg class="btn__icon" aria-hidden="true"><use href="#i-arrow"/></svg>
+            </button>
+          </div>
         </div>
 
-        <p id="dashboardMessage" class="dashboard-message" role="status" aria-live="polite"></p>
-        <div class="table-scroll">
-          <table class="request-table">
-            <thead>
-              <tr>
-                <th scope="col">Request</th>
-                <th scope="col">Location</th>
-                <th scope="col">Resources needed</th>
-                <th scope="col">Submitted</th>
-                <th scope="col">Decision</th>
-                <th scope="col"><span class="visually-hidden">Actions</span></th>
-              </tr>
-            </thead>
-            <tbody id="requestRows"></tbody>
-          </table>
-          <div id="emptyState" class="empty-state" hidden>
-            <div class="empty-icon" aria-hidden="true">⌁</div>
-            <h3>No requests to show</h3>
-            <p>New public submissions will appear here automatically.</p>
+        <div class="kpi-grid">
+          <article class="kpi"><span class="kpi__label">Total requests</span><span class="kpi__value" id="kpiTotal">—</span><span class="kpi__meta">All statuses</span></article>
+          <article class="kpi kpi--warn"><span class="kpi__label">Awaiting verification</span><span class="kpi__value" id="kpiVerification">—</span><span class="kpi__meta">Submitted, verifying and awaiting approval</span></article>
+          <article class="kpi kpi--danger"><span class="kpi__label">High-risk open</span><span class="kpi__value" id="kpiHighRisk">—</span><span class="kpi__meta">Needs a person, never auto-rejected</span></article>
+          <article class="kpi"><span class="kpi__label">Possible duplicates</span><span class="kpi__value" id="kpiDuplicates">—</span><span class="kpi__meta">Merge, link or keep separate</span></article>
+          <article class="kpi"><span class="kpi__label">Active disasters</span><span class="kpi__value" id="kpiActive">—</span><span class="kpi__meta">Approved through in progress</span></article>
+          <article class="kpi kpi--ok"><span class="kpi__label">Approved</span><span class="kpi__value" id="kpiApproved">—</span><span class="kpi__meta">Eligible or allocated</span></article>
+          <article class="kpi"><span class="kpi__label">Rejected</span><span class="kpi__value" id="kpiRejected">—</span><span class="kpi__meta">Human decision, reason recorded</span></article>
+          <article class="kpi kpi--danger"><span class="kpi__label">Flagged</span><span class="kpi__value" id="kpiFlagged">—</span><span class="kpi__meta">Marked for follow-up</span></article>
+        </div>
+
+        <div class="queue-grid" aria-label="Verification queues">
+          <button class="queue-card" type="button" data-queue-jump="high_risk">
+            <span class="queue-card__label"><span class="queue-dot queue-dot--danger"></span> High-risk verification</span>
+            <span class="queue-card__value" id="queueHighRisk">0</span>
+            <span class="queue-card__hint">Manual review required</span>
+          </button>
+          <button class="queue-card" type="button" data-queue-jump="duplicate_review">
+            <span class="queue-card__label"><span class="queue-dot queue-dot--purple"></span> Duplicate review</span>
+            <span class="queue-card__value" id="queueDuplicate">0</span>
+            <span class="queue-card__hint">Compare, merge or keep separate</span>
+          </button>
+          <button class="queue-card" type="button" data-queue-jump="manual_review">
+            <span class="queue-card__label"><span class="queue-dot queue-dot--warn"></span> Manual review</span>
+            <span class="queue-card__value" id="queueManual">0</span>
+            <span class="queue-card__hint">Awaiting approval</span>
+          </button>
+          <button class="queue-card" type="button" data-queue-jump="auto_approval">
+            <span class="queue-card__label"><span class="queue-dot queue-dot--info"></span> Auto-approval</span>
+            <span class="queue-card__value" id="queueAuto">0</span>
+            <span class="queue-card__hint">Rule-managed candidates</span>
+          </button>
+        </div>
+
+        <div class="grid grid--main">
+          <section class="card map-card">
+            <div class="card__head">
+              <div>
+                <h2 class="card__title">Operations map</h2>
+                <p class="card__sub">Open incidents and registered help centres.</p>
+              </div>
+              <span class="badge badge--neutral" id="mapSummary">—</span>
+            </div>
+            <div class="map admin-map" id="adminOverviewMap" style="height:400px" role="region" aria-label="Map of incidents and help centres"></div>
+            <div class="map-note">
+              <svg width="15" height="15" aria-hidden="true"><use href="#i-info"/></svg>
+              <span id="mapNote">Select a marker for details. Distance and routing use the same engine as the public map.</span>
+            </div>
+          </section>
+
+          <div class="grid" style="gap:18px">
+            <section class="card">
+              <div class="card__head">
+                <div>
+                  <h2 class="card__title">Risk profile of open requests</h2>
+                  <p class="card__sub">Risk scores from the verification engine.</p>
+                </div>
+              </div>
+              <div class="card__body stack" style="gap:12px">
+                <div>
+                  <div class="between"><span class="small">High risk</span><strong class="small" id="riskHighCount">0</strong></div>
+                  <div class="risk-scale__bar mt-8"><i id="riskHighBar" style="width:0%;background:var(--danger)"></i></div>
+                </div>
+                <div>
+                  <div class="between"><span class="small">Medium risk</span><strong class="small" id="riskMediumCount">0</strong></div>
+                  <div class="risk-scale__bar mt-8"><i id="riskMediumBar" style="width:0%;background:var(--warn)"></i></div>
+                </div>
+                <div>
+                  <div class="between"><span class="small">Low risk</span><strong class="small" id="riskLowCount">0</strong></div>
+                  <div class="risk-scale__bar mt-8"><i id="riskLowBar" style="width:0%;background:var(--ok)"></i></div>
+                </div>
+                <div class="notice notice--info" style="font-size:0.78rem">
+                  <svg width="15" height="15" aria-hidden="true"><use href="#i-shield"/></svg>
+                  <span>Risk never rejects a report. High-risk and uncertain cases always reach a human.</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="card">
+              <div class="card__head">
+                <div>
+                  <h2 class="card__title">Resources</h2>
+                  <p class="card__sub">Available at centres vs. committed.</p>
+                </div>
+                <a class="btn btn--ghost btn--sm" href="#settings" data-go="settings">Manage</a>
+              </div>
+              <div class="card__body" id="resourceGrid">
+                <div class="loading-block"><span class="spinner spinner--dark"></span> Loading stock…</div>
+              </div>
+            </section>
           </div>
+        </div>
+
+        <section class="card">
+          <div class="card__head">
+            <div>
+              <h2 class="card__title">Latest activity</h2>
+              <p class="card__sub">Every critical operation is written to the audit log.</p>
+            </div>
+            <a class="btn btn--ghost btn--sm" href="#audit" data-go="audit">Full audit log</a>
+          </div>
+          <div id="recentAudit"><div class="loading-block"><span class="spinner spinner--dark"></span> Loading…</div></div>
+        </section>
+      </section>
+
+      <!-- QUEUE -->
+      <section class="admin-view" id="viewQueue" data-view="queue" hidden>
+        <div class="view-head">
+          <div>
+            <h1>Verification queue</h1>
+            <p>Reports waiting for a human decision. High-risk and duplicate cases are never discarded automatically.</p>
+          </div>
+          <span class="badge badge--neutral badge--lg" id="queueHeadCount">—</span>
+        </div>
+        <section class="card">
+          <div class="tabs" id="queueTabs" role="tablist" aria-label="Verification queues">
+            <button class="tab" type="button" data-queue="all" role="tab" aria-selected="true">All open <span class="tab__count" id="tabAll">0</span></button>
+            <button class="tab" type="button" data-queue="high_risk" role="tab" aria-selected="false">High risk <span class="tab__count" id="tabHighRisk">0</span></button>
+            <button class="tab" type="button" data-queue="duplicate_review" role="tab" aria-selected="false">Duplicates <span class="tab__count" id="tabDuplicate">0</span></button>
+            <button class="tab" type="button" data-queue="manual_review" role="tab" aria-selected="false">Manual <span class="tab__count" id="tabManual">0</span></button>
+            <button class="tab" type="button" data-queue="auto_approval" role="tab" aria-selected="false">Auto-approval <span class="tab__count" id="tabAuto">0</span></button>
+          </div>
+          <div class="filter-bar">
+            <div class="search-field">
+              <svg width="16" height="16" aria-hidden="true"><use href="#i-search"/></svg>
+              <input class="input" id="queueSearch" type="search" placeholder="Search ID, location, contact or description" aria-label="Search the verification queue">
+            </div>
+            <select class="select" id="queueSeverity" aria-label="Filter by severity">
+              <option value="">Any severity</option>
+              <option value="CRITICAL">Critical</option>
+              <option value="HIGH">High</option>
+              <option value="MEDIUM">Medium</option>
+              <option value="LOW">Low</option>
+            </select>
+            <select class="select" id="queueSort" aria-label="Sort queue">
+              <option value="oldest">Oldest first</option>
+              <option value="risk">Highest risk</option>
+              <option value="newest">Newest first</option>
+            </select>
+          </div>
+          <div class="filter-meta"><span id="queueMeta">Loading…</span></div>
+          <div id="queueTable"><div class="loading-block"><span class="spinner spinner--dark"></span> Loading queue…</div></div>
+        </section>
+      </section>
+
+      <!-- ALL REQUESTS -->
+      <section class="admin-view" id="viewRequests" data-view="requests" hidden>
+        <div class="view-head">
+          <div>
+            <h1>All requests</h1>
+            <p>Search and filter every report. Select a row to open the review panel.</p>
+          </div>
+          <span class="badge badge--neutral badge--lg" id="requestsHeadCount">—</span>
+        </div>
+        <section class="card">
+          <div class="filter-bar">
+            <div class="search-field">
+              <svg width="16" height="16" aria-hidden="true"><use href="#i-search"/></svg>
+              <input class="input" id="reqSearch" type="search" placeholder="Search ID, location, contact, description" aria-label="Search requests">
+            </div>
+            <select class="select" id="reqStatus" aria-label="Filter by status">
+              <option value="">Any status</option>
+            </select>
+            <select class="select" id="reqRisk" aria-label="Filter by risk">
+              <option value="">Any risk</option>
+              <option value="high">High risk</option>
+              <option value="medium">Medium risk</option>
+              <option value="low">Low risk</option>
+            </select>
+            <select class="select" id="reqSeverity" aria-label="Filter by severity">
+              <option value="">Any severity</option>
+              <option value="CRITICAL">Critical</option>
+              <option value="HIGH">High</option>
+              <option value="MEDIUM">Medium</option>
+              <option value="LOW">Low</option>
+            </select>
+            <select class="select" id="reqType" aria-label="Filter by disaster type">
+              <option value="">Any type</option>
+            </select>
+            <select class="select" id="reqSort" aria-label="Sort requests">
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+              <option value="risk">Highest risk</option>
+              <option value="severity">Most severe</option>
+            </select>
+            <button class="btn btn--ghost btn--sm" id="clearFilters" type="button">Clear</button>
+          </div>
+          <div class="filter-meta"><span id="requestsMeta">Loading…</span></div>
+          <div id="requestTable"><div class="loading-block"><span class="spinner spinner--dark"></span> Loading requests…</div></div>
+        </section>
+      </section>
+
+      <!-- MAP -->
+      <section class="admin-view" id="viewMap" data-view="map" hidden>
+        <div class="view-head">
+          <div>
+            <h1>Operations map</h1>
+            <p>Active incident locations and the help-centre network.</p>
+          </div>
+          <div class="map-legend" id="adminMapLegend"></div>
+        </div>
+        <section class="card map-card">
+          <div class="map-toolbar">
+            <div class="chip-row" id="mapFilters">
+              <button class="chip is-active" type="button" data-layer="incident" aria-pressed="true">Incidents</button>
+              <button class="chip is-active" type="button" data-layer="hospital" aria-pressed="true">Hospitals</button>
+              <button class="chip is-active" type="button" data-layer="relief_camp" aria-pressed="true">Relief camps</button>
+              <button class="chip is-active" type="button" data-layer="food_water" aria-pressed="true">Food &amp; water</button>
+              <button class="chip is-active" type="button" data-layer="rescue_team" aria-pressed="true">Rescue</button>
+              <button class="chip is-active" type="button" data-layer="warehouse" aria-pressed="true">Warehouses</button>
+              <button class="chip is-active" type="button" data-layer="shelter" aria-pressed="true">Shelters</button>
+              <button class="chip is-active" type="button" data-layer="medical_camp" aria-pressed="true">Medical camps</button>
+            </div>
+            <span class="small muted" id="adminMapSummary" style="margin-left:auto"></span>
+          </div>
+          <div class="map admin-map" id="adminMap" style="height:560px" role="region" aria-label="Operations map"></div>
+          <div class="map-note">
+            <svg width="15" height="15" aria-hidden="true"><use href="#i-info"/></svg>
+            <span>Incident markers open the review panel. Help-centre markers show contact and stock summaries.</span>
+          </div>
+        </section>
+      </section>
+
+      <!-- CENTRES -->
+      <section class="admin-view" id="viewCentres" data-view="centres" hidden>
+        <div class="view-head">
+          <div>
+            <h1>Help centres &amp; stock</h1>
+            <p>Hospitals, camps, rescue teams and warehouses used for allocation.</p>
+          </div>
+          <button class="btn btn--primary btn--sm" id="addCentreButton" type="button">
+            <svg class="btn__icon" aria-hidden="true"><use href="#i-plus"/></svg> Add centre
+          </button>
+        </div>
+        <div class="notice notice--warn">
+          <svg width="16" height="16" aria-hidden="true"><use href="#i-info"/></svg>
+          <span>Seeded centre records are realistic sample data for demonstration. Replace addresses, phone numbers and stock with verified operational data before real use.</span>
+        </div>
+        <section class="card">
+          <div class="filter-bar">
+            <div class="search-field">
+              <svg width="16" height="16" aria-hidden="true"><use href="#i-search"/></svg>
+              <input class="input" id="centreSearch" type="search" placeholder="Search name, address or category" aria-label="Search help centres">
+            </div>
+            <select class="select" id="centreCategoryFilter" aria-label="Filter by category">
+              <option value="">All categories</option>
+            </select>
+            <span class="filter-bar__spacer"></span>
+            <span class="small muted" id="centreMeta">Loading…</span>
+          </div>
+          <div id="centreTable"><div class="loading-block"><span class="spinner spinner--dark"></span> Loading centres…</div></div>
+        </section>
+      </section>
+
+      <!-- AUDIT -->
+      <section class="admin-view" id="viewAudit" data-view="audit" hidden>
+        <div class="view-head">
+          <div>
+            <h1>Audit log</h1>
+            <p>Immutable record of submissions, verifications, decisions, merges and dispatches.</p>
+          </div>
+          <span class="badge badge--neutral badge--lg" id="auditHeadCount">—</span>
+        </div>
+        <section class="card">
+          <div class="filter-bar">
+            <div class="search-field">
+              <svg width="16" height="16" aria-hidden="true"><use href="#i-search"/></svg>
+              <input class="input" id="auditSearch" type="search" placeholder="Search action, actor, request or reason" aria-label="Search audit log">
+            </div>
+            <select class="select" id="auditLimit" aria-label="Rows to load">
+              <option value="200">Last 200</option>
+              <option value="500">Last 500</option>
+              <option value="1000">Last 1000</option>
+            </select>
+            <span class="filter-bar__spacer"></span>
+            <span class="small muted" id="auditMeta">Loading…</span>
+          </div>
+          <div id="auditTable"><div class="loading-block"><span class="spinner spinner--dark"></span> Loading audit log…</div></div>
+        </section>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="admin-view" id="viewSettings" data-view="settings" hidden>
+        <div class="view-head">
+          <div>
+            <h1>Settings</h1>
+            <p>Approval automation, risk thresholds, routing and reserve stock.</p>
+          </div>
+          <span class="badge badge--neutral" id="settingsRoleNote">Administrator only</span>
+        </div>
+
+        <div class="settings-grid">
+          <section class="card">
+            <div class="card__head">
+              <div>
+                <h2 class="card__title">Automated approval rules</h2>
+                <p class="card__sub">Only low-risk reports that meet every rule can be approved automatically.</p>
+              </div>
+            </div>
+            <div class="card__body">
+              <div class="setting-row">
+                <div class="setting-row__text">
+                  <strong>Enable automatic approval</strong>
+                  <span>Off by default. When on, the backend may approve reports that satisfy all rules below. It can never reject a report.</span>
+                </div>
+                <label class="switch"><input type="checkbox" id="setAutoApprove" aria-label="Enable automatic approval"><span class="switch__track"></span><span class="visually-hidden">Enable auto approval</span></label>
+              </div>
+              <div class="setting-row">
+                <div class="setting-row__text">
+                  <strong>Maximum risk score to auto-approve</strong>
+                  <span>0–100. Requests above this score always go to a person.</span>
+                </div>
+                <div class="setting-row__control"><input class="input" id="setMaxRisk" type="number" min="0" max="100" step="1" aria-label="Maximum risk score to auto-approve"></div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-row__text">
+                  <strong>Severities eligible for auto-approval</strong>
+                  <span>Critical requests are usually excluded.</span>
+                </div>
+                <div class="setting-row__control severity-picks" id="setSeverities">
+                  <label class="checkbox"><input type="checkbox" value="LOW"> Low</label>
+                  <label class="checkbox"><input type="checkbox" value="MEDIUM"> Medium</label>
+                  <label class="checkbox"><input type="checkbox" value="HIGH"> High</label>
+                  <label class="checkbox"><input type="checkbox" value="CRITICAL"> Critical</label>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-row__text">
+                  <strong>Minimum description length</strong>
+                  <span>Characters required before auto-approval is considered.</span>
+                </div>
+                <div class="setting-row__control"><input class="input" id="setMinDesc" type="number" min="0" max="2000" step="5" aria-label="Minimum description length"></div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-row__text">
+                  <strong>Require a usable contact</strong>
+                  <span>Phone or email must be present and valid.</span>
+                </div>
+                <label class="switch"><input type="checkbox" id="setRequireContact"><span class="switch__track"></span><span class="visually-hidden">Require contact</span></label>
+              </div>
+              <div class="setting-row">
+                <div class="setting-row__text">
+                  <strong>Block duplicate matches from auto-approval</strong>
+                  <span>A possible duplicate is always reviewed by a person.</span>
+                </div>
+                <label class="switch"><input type="checkbox" id="setBlockDuplicates"><span class="switch__track"></span><span class="visually-hidden">Block duplicates from auto approval</span></label>
+              </div>
+              <div class="btn-row mt-16">
+                <button class="btn btn--primary btn--sm" id="saveSettings" type="button">Save approval rules</button>
+                <span class="small muted" id="settingsStatus"></span>
+              </div>
+            </div>
+          </section>
+
+          <div class="grid" style="gap:18px">
+            <section class="card">
+              <div class="card__head">
+                <div>
+                  <h2 class="card__title">Detection thresholds</h2>
+                  <p class="card__sub">Duplicate window and risk band boundaries.</p>
+                </div>
+              </div>
+              <div class="card__body">
+                <div class="form-grid">
+                  <div class="field"><label for="setDupWindow">Duplicate window (hours)</label><input class="input" id="setDupWindow" type="number" min="1" max="720"></div>
+                  <div class="field"><label for="setDupThreshold">Duplicate threshold (0–100)</label><input class="input" id="setDupThreshold" type="number" min="0" max="100"></div>
+                  <div class="field"><label for="setMedium">Medium-risk threshold</label><input class="input" id="setMedium" type="number" min="0" max="100"></div>
+                  <div class="field"><label for="setHigh">High-risk threshold</label><input class="input" id="setHigh" type="number" min="0" max="100"></div>
+                  <div class="field"><label for="setRateLimit">Reports per IP per window</label><input class="input" id="setRateLimit" type="number" min="1" max="1000"></div>
+                  <div class="field"><label for="setRateWindow">Rate window (minutes)</label><input class="input" id="setRateWindow" type="number" min="1" max="1440"></div>
+                </div>
+                <div class="btn-row mt-16">
+                  <button class="btn btn--primary btn--sm" id="saveThresholds" type="button">Save thresholds</button>
+                  <span class="small muted" id="thresholdsStatus"></span>
+                </div>
+              </div>
+            </section>
+
+            <section class="card">
+              <div class="card__head">
+                <div>
+                  <h2 class="card__title">Routing provider</h2>
+                  <p class="card__sub">Server-side only — no API key is exposed to the browser.</p>
+                </div>
+              </div>
+              <div class="card__body" id="routingInfo">
+                <div class="loading-block"><span class="spinner spinner--dark"></span> Loading…</div>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <div class="settings-grid">
+          <section class="card">
+            <div class="card__head">
+              <div>
+                <h2 class="card__title">Central reserve</h2>
+                <p class="card__sub">Command-centre stock separate from centre-level inventory.</p>
+              </div>
+            </div>
+            <div class="card__body">
+              <form id="reserveForm" class="stack" style="gap:12px"></form>
+              <div class="btn-row mt-16">
+                <button class="btn btn--primary btn--sm" id="saveReserve" type="button">Save reserve</button>
+                <span class="small muted" id="reserveStatus"></span>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card__head">
+              <div>
+                <h2 class="card__title">Demo data &amp; safeguards</h2>
+                <p class="card__sub">Useful for evaluation, never loaded automatically.</p>
+              </div>
+            </div>
+            <div class="card__body stack">
+              <p class="small muted">Insert nine realistic sample incidents (including a duplicate pair and a high-risk report) to exercise the workflow. Safe to run once; it does nothing if demo requests already exist.</p>
+              <div class="btn-row">
+                <button class="btn btn--secondary btn--sm" id="seedDemoButton" type="button">Insert demo incidents</button>
+                <span class="small muted" id="seedStatus"></span>
+              </div>
+              <hr class="divider">
+              <p class="small"><strong>Guarantee:</strong> the automated verifier can only flag. Approval automation is opt-in, and rejection always requires a human with a recorded reason.</p>
+              <p class="small muted" id="roleExplanation">Administrators can change settings, stock and centres. Operators can review, approve and allocate, but cannot change configuration.</p>
+            </div>
+          </section>
         </div>
       </section>
-      <p class="data-note">Accepting a request allocates the requested supplies from current stock (capped at what is on hand) and records your message for the user. Rejecting records the message only.</p>
-    </section>
+    </main>
+  </div>
+</div>
 
-    <dialog id="decisionDialog" class="decision-dialog" aria-labelledby="decisionDialogTitle">
-      <h2 id="decisionDialogTitle">Record decision</h2>
-      <p class="muted" id="decisionDialogIntro">The message below is delivered to the user with your decision.</p>
-      <label for="decisionMessage">Message to the user</label>
-      <textarea id="decisionMessage" rows="5" maxlength="1000"></textarea>
-      <p class="dialog-hint">This text is shown to the user on the track-status page. Keep it short and concrete — what was decided, what will be provided, and what to do next.</p>
-      <p id="decisionError" class="message" role="alert" aria-live="polite"></p>
-      <div class="dialog-actions">
-        <button type="button" class="button button-quiet" id="decisionCancel">Cancel</button>
-        <button type="button" class="button button-primary" id="decisionConfirm">Save decision</button>
+<!-- ================= REQUEST DRAWER ================= -->
+<div class="drawer" id="requestDrawer" hidden>
+  <button class="drawer__backdrop" id="drawerBackdrop" type="button" aria-label="Close request panel"></button>
+  <div class="drawer__panel" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
+    <div class="drawer__head">
+      <div style="min-width:0">
+        <div class="drawer__title" id="drawerTitle">Request</div>
+        <div class="drawer__sub" id="drawerSub"></div>
       </div>
-    </dialog>
-  </main>
+      <button class="icon-btn" id="drawerClose" type="button" aria-label="Close request panel">
+        <svg width="18" height="18" aria-hidden="true"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="drawer__body" id="drawerBody">
+      <div class="loading-block"><span class="spinner spinner--dark"></span> Loading request…</div>
+    </div>
+    <div class="drawer__foot" id="drawerFoot"></div>
+  </div>
+</div>
 
-  <footer class="page-footer">DRRAS · Admin access</footer>
+<!-- ================= DIALOGS ================= -->
+<dialog id="actionDialog" aria-labelledby="dialogTitle">
+  <div class="dialog__head">
+    <h2 id="dialogTitle">Confirm action</h2>
+    <p id="dialogIntro"></p>
+  </div>
+  <div class="dialog__body">
+    <div id="dialogBody"></div>
+    <p class="field-error" id="dialogError" role="alert"></p>
+  </div>
+  <div class="dialog__foot">
+    <button class="btn btn--secondary btn--sm" type="button" id="dialogCancel">Cancel</button>
+    <button class="btn btn--primary btn--sm" type="button" id="dialogConfirm">Confirm</button>
+  </div>
+</dialog>
+
+<dialog id="centreDialog" aria-labelledby="centreDialogTitle">
+  <div class="dialog__head">
+    <h2 id="centreDialogTitle">Help centre</h2>
+    <p>Changes take effect immediately for allocation recommendations.</p>
+  </div>
+  <form id="centreForm" class="dialog__body">
+    <div class="form-grid" style="gap:12px">
+      <div class="field form-grid--full"><label for="centreName">Name</label><input class="input" id="centreName" required maxlength="160"></div>
+      <div class="field"><label for="centreCategory">Category</label><select class="select" id="centreCategory"></select></div>
+      <div class="field"><label for="centreAvailability">Availability</label><select class="select" id="centreAvailability">
+        <option value="available">Available</option><option value="limited">Limited</option>
+        <option value="full">At capacity</option><option value="closed">Closed</option>
+      </select></div>
+      <div class="field form-grid--full"><label for="centreAddress">Address</label><input class="input" id="centreAddress" maxlength="240"></div>
+      <div class="field"><label for="centrePhone">Phone</label><input class="input" id="centrePhone" maxlength="40"></div>
+      <div class="field"><label for="centreCapacity">Capacity note</label><input class="input" id="centreCapacity" maxlength="240"></div>
+      <div class="field"><label for="centreLat">Latitude</label><input class="input" id="centreLat" type="number" step="any" min="-90" max="90" required></div>
+      <div class="field"><label for="centreLon">Longitude</label><input class="input" id="centreLon" type="number" step="any" min="-180" max="180" required></div>
+    </div>
+    <div class="form-section">
+      <p class="form-section__title">Stock on hand</p>
+      <div class="form-grid" id="centreStockFields" style="gap:10px"></div>
+    </div>
+    <p class="field-error" id="centreDialogError" role="alert"></p>
+    <div class="dialog__foot" style="padding-left:0;padding-right:0">
+      <button class="btn btn--secondary btn--sm" type="button" id="centreCancel">Cancel</button>
+      <button class="btn btn--primary btn--sm" type="submit" id="centreSave">Save centre</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="false"></div>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script type="module" src="js/admin.js?v=3"></script>
 </body>
 </html>
