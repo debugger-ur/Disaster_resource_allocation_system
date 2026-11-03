@@ -9,6 +9,7 @@ from __future__ import annotations
 import http.client
 import http.cookiejar
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -19,6 +20,8 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Keep the API suite deterministic and independent of outbound routing services.
+os.environ.setdefault("DRRAS_OFFLINE", "1")
 
 import admin_server  # noqa: E402
 
