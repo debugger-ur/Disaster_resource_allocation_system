@@ -1,571 +1,108 @@
 #!/usr/bin/env python3
-"""DRRAS request-review service.
+"""DRRAS web service.
 
-Serves the static site in ``docs/`` and the JSON API that the public relief
-request form and the admin dashboard talk to. Standard library only (plus the
-sqlite3 module that ships with CPython), so it runs anywhere Python runs.
+Serves the static site in ``docs/`` and the JSON API used by the public
+reporting/tracking pages and the command-centre dashboard. Standard library
+only (plus the sqlite3 module that ships with CPython).
 
 Usage:
-    python3 backend/admin_server.py --set-password   # create/reset admin password
-    python3 backend/admin_server.py                  # serve on http://0.0.0.0:8000
+    python3 backend/admin_server.py --set-password          # create/reset admin password
+    python3 backend/admin_server.py --seed-demo            # add sample incidents
+    python3 backend/admin_server.py                        # serve on http://0.0.0.0:8000
 
 Environment:
-    DRRAS_DB_PATH          absolute SQLite path (shared by password setup + server)
-    DRRAS_COOKIE_SECURE      "1" to mark the session cookie Secure (use behind HTTPS)
-    DRRAS_PORT / DRRAS_HOST  defaults for the bind address
+    DRRAS_DB_PATH          SQLite path (shared by password setup + server)
+    DRRAS_ADMIN_PASSWORD   optional first-run admin password (12+ chars)
+    DRRAS_OPERATOR_PASSWORD optional operator password (review without settings access)
+    DRRAS_COOKIE_SECURE    "1" to mark the session cookie Secure (behind HTTPS)
+    DRRAS_ROUTING_URL      OSRM base URL (default https://router.project-osrm.org)
+    DRRAS_GEOCODING_URL    Nominatim base URL
+    DRRAS_OFFLINE=1        never make outbound routing/geocoding calls
+    DRRAS_PORT / DRRAS_HOST bind defaults
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import getpass
-import hashlib
-import hmac
 import html
 import json
 import os
-import secrets
-import sqlite3
 import sys
-import time
-from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+import traceback
+from datetime import timedelta
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlparse
+
+# Shared domain layer. These names are re-exported here because the original
+# module was the single import point for the whole application and its tests.
+from drras_common import (  # noqa: F401  (re-exported for backwards compatibility)
+    ALLOCATION_STATUSES,
+    CENTRE_AVAILABILITY,
+    DEFAULT_ACCEPT_MESSAGE,
+    DEFAULT_DECISION_MESSAGES,
+    DEFAULT_INVENTORY,
+    DEFAULT_REJECT_MESSAGE,
+    DEFAULT_SETTINGS,
+    DISASTER_TYPES,
+    EVIDENCE_ALLOWED_TYPES,
+    EVIDENCE_MAX_BYTES,
+    HELP_CENTRE_CATEGORIES,
+    MAX_RESOURCE_QUANTITY,
+    MESSAGE_MAX_LENGTH,
+    RESOURCE_CATEGORIES,
+    SEVERITIES,
+    WORKFLOW_STATUSES,
+    ApiError,
+    iso,
+    plan_submission_grant,
+    utc_now,
+)
+from db_store import Store  # noqa: F401  (re-exported)
+from drras_geo import routing_status
 
 BACKEND_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BACKEND_DIR.parent
 STATIC_ROOT = REPO_ROOT / "docs"
 DEFAULT_DB_PATH = BACKEND_DIR / "data" / "drras.sqlite3"
+DEFAULT_UPLOAD_DIR = BACKEND_DIR / "data" / "uploads"
 
 SESSION_COOKIE_NAME = "drras_session"
 SESSION_LIFETIME = timedelta(hours=8)
 MIN_PASSWORD_LENGTH = 12
 PBKDF2_ITERATIONS = 210_000
 MAX_BODY_BYTES = 64 * 1024
-# Bodies beyond this are never read; the connection is closed instead, so a
-# huge Content-Length cannot hold the keep-alive socket hostage.
-HARD_BODY_CAP = 8 * 1024 * 1024
+MAX_UPLOAD_BODY_BYTES = 8 * 1024 * 1024
+HARD_BODY_CAP = 12 * 1024 * 1024
+MAX_DESCRIPTION_LENGTH = 2000
+MAX_EVIDENCE_FILES = 5
 
-# SameSite=Strict is the right default for a normal deployment, but it makes the
-# session cookie invisible to any page embedded in a cross-site frame (an
-# in-app preview, an <iframe> on the college portal): the browser drops it, so
-# the first API call after signing in comes back 401 and the dashboard looks
-# "expired" within a second. Run with SameSite=None in that setup.
 COOKIE_SAMESITE_DEFAULT = "Strict"
 COOKIE_SAMESITE_VALUES = ("Strict", "Lax", "None")
 
-# Brute-force protection: at most this many failed sign-ins per IP per window.
 LOGIN_MAX_ATTEMPTS = 8
 LOGIN_WINDOW_SECONDS = 15 * 60
 
-DISASTER_TYPES = {
-    "FLOOD",
-    "EARTHQUAKE",
-    "FIRE",
-    "LANDSLIDE",
-    "INDUSTRIAL_ACCIDENT",
-    "OTHER",
-}
-SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
-RESOURCE_CATEGORIES = {"Ambulance", "RescueTeam", "MedicalTeam", "Equipment", "Supply"}
 STATUSES = ("pending", "accepted", "rejected")
+ROLES = ("admin", "operator")
 
-# Supplies physically on hand per resource category ("at this moment"). Admins
-# can adjust the numbers through PUT /api/admin/inventory; fresh databases start
-# from these figures (totals of the sample data/resources.csv in the C++ app).
-DEFAULT_INVENTORY = {
-    "Ambulance": 3,
-    "RescueTeam": 18,
-    "MedicalTeam": 5,
-    "Equipment": 2,
-    "Supply": 1500,
-}
-MAX_RESOURCE_QUANTITY = 1_000_000_000
-MESSAGE_MAX_LENGTH = 1000
-
-# Delivered to the user whenever an admin accepts or rejects without writing a
-# custom note. The user reads them on the public status endpoint / track form.
-DEFAULT_ACCEPT_MESSAGE = (
-    "Your relief request has been ACCEPTED by the command center. "
-    "Relief units are being dispatched to your location. "
-    "Please stay in a safe, accessible area and keep your communication line open."
-)
-DEFAULT_REJECT_MESSAGE = (
-    "Your relief request has been reviewed and REJECTED by the command center. "
-    "This typically happens when the zone is already covered by ongoing operations "
-    "or the request was merged with a duplicate. "
-    "If you are in immediate danger, please contact local emergency services (112)."
-)
-DEFAULT_DECISION_MESSAGES = {
-    "accepted": DEFAULT_ACCEPT_MESSAGE,
-    "rejected": DEFAULT_REJECT_MESSAGE,
-}
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS admin_credentials (
-    id           INTEGER PRIMARY KEY CHECK (id = 1),
-    salt         BLOB    NOT NULL,
-    iterations   INTEGER NOT NULL,
-    password_hash BLOB   NOT NULL,
-    updated_at   TEXT    NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    token_hash  TEXT PRIMARY KEY,
-    csrf_token  TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    expires_at  TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS requests (
-    id                 TEXT    PRIMARY KEY,
-    type               TEXT    NOT NULL,
-    severity           TEXT    NOT NULL,
-    affected_people    INTEGER NOT NULL,
-    required_resources TEXT    NOT NULL DEFAULT '[]',
-    location_name      TEXT    NOT NULL,
-    latitude           REAL    NOT NULL,
-    longitude          REAL    NOT NULL,
-    status             TEXT    NOT NULL DEFAULT 'pending',
-    submitted_at       TEXT    NOT NULL,
-    decided_at         TEXT,
-    resource_quantities TEXT   NOT NULL DEFAULT '{}',
-    granted_resources  TEXT    NOT NULL DEFAULT '{}',
-    user_message       TEXT,
-    decision_message   TEXT
-);
-
-CREATE TABLE IF NOT EXISTS inventory (
-    category TEXT    PRIMARY KEY,
-    quantity INTEGER NOT NULL CHECK (quantity >= 0)
-);
-
-CREATE TABLE IF NOT EXISTS login_attempts (
-    ip            TEXT NOT NULL,
-    attempted_at  REAL NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
-CREATE INDEX IF NOT EXISTS idx_login_ip_time ON login_attempts(ip, attempted_at);
-"""
+# Loopback traffic is never rate-limited: local demos and the test suite submit
+# dozens of requests from 127.0.0.1, and an operator cannot spam themselves
+# through a network they already control.
+LOOPBACK_IPS = {"127.0.0.1", "::1", "localhost", ""}
 
 
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def resolve_db_path(cli_value: str | None) -> Path:
-    """CLI wins over the environment, then the repo-local default."""
-    if cli_value:
-        return Path(cli_value).expanduser().resolve()
-    env_value = os.environ.get("DRRAS_DB_PATH")
-    if env_value:
-        return Path(env_value).expanduser().resolve()
-    return DEFAULT_DB_PATH
-
-
-class ApiError(Exception):
-    def __init__(self, message: str, status: int = HTTPStatus.BAD_REQUEST) -> None:
-        super().__init__(message)
-        self.status = status
-        self.message = message
-
-
-class Store:
-    """SQLite persistence. One short-lived connection per operation, so this is
-    safe to use from ThreadingHTTPServer's worker threads."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.executescript(SCHEMA)
-            self._migrate(conn)
-            # Seed the starting stock once; later runs keep whatever admins set.
-            for category, quantity in DEFAULT_INVENTORY.items():
-                conn.execute(
-                    "INSERT OR IGNORE INTO inventory (category, quantity) VALUES (?, ?)",
-                    (category, quantity),
-                )
-
-    @staticmethod
-    def _migrate(conn) -> None:
-        """Adds columns introduced after a database was first created."""
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(requests)")}
-        for name, declaration in (
-            ("resource_quantities", "TEXT NOT NULL DEFAULT '{}'"),
-            ("granted_resources", "TEXT NOT NULL DEFAULT '{}'"),
-            ("user_message", "TEXT"),
-            ("decision_message", "TEXT"),
-        ):
-            if name not in columns:
-                conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {declaration}")
-
-    @contextmanager
-    def _connect(self):
-        conn = sqlite3.connect(self.path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-    # ---- credentials ----
-
-    def set_password(self, password: str) -> None:
-        salt = secrets.token_bytes(16)
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO admin_credentials (id, salt, iterations, password_hash, updated_at)
-                VALUES (1, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    salt = excluded.salt,
-                    iterations = excluded.iterations,
-                    password_hash = excluded.password_hash,
-                    updated_at = excluded.updated_at
-                """,
-                (salt, PBKDF2_ITERATIONS, digest, iso(utc_now())),
-            )
-
-    def has_password(self) -> bool:
-        with self._connect() as conn:
-            row = conn.execute("SELECT 1 AS ok FROM admin_credentials WHERE id = 1").fetchone()
-        return row is not None
-
-    def verify_password(self, password: str) -> bool:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT salt, iterations, password_hash FROM admin_credentials WHERE id = 1"
-            ).fetchone()
-        if row is None:
-            return False
-        candidate = hashlib.pbkdf2_hmac(
-            "sha256", password.encode("utf-8"), bytes(row["salt"]), int(row["iterations"])
-        )
-        return hmac.compare_digest(candidate, bytes(row["password_hash"]))
-
-    # ---- sessions ----
-
-    def create_session(self) -> tuple[str, str]:
-        token = secrets.token_urlsafe(32)
-        csrf = secrets.token_urlsafe(32)
-        now = utc_now()
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO sessions (token_hash, csrf_token, created_at, expires_at) VALUES (?, ?, ?, ?)",
-                (self._hash(token), csrf, iso(now), iso(now + SESSION_LIFETIME)),
-            )
-            conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (iso(now),))
-        return token, csrf
-
-    @staticmethod
-    def _hash(token: str) -> str:
-        return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-    def get_session(self, token: str) -> sqlite3.Row | None:
-        if not token:
-            return None
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT token_hash, csrf_token, expires_at FROM sessions WHERE token_hash = ?",
-                (self._hash(token),),
-            ).fetchone()
-        if row is None:
-            return None
-        if datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00")) <= utc_now():
-            self.delete_session(token)
-            return None
-        return row
-
-    def check_csrf(self, token: str, csrf: str) -> bool:
-        session = self.get_session(token)
-        if session is None or not csrf:
-            return False
-        return hmac.compare_digest(session["csrf_token"], csrf)
-
-    def delete_session(self, token: str) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM sessions WHERE token_hash = ?", (self._hash(token),))
-
-    # ---- login rate limiting ----
-
-    def too_many_login_attempts(self, ip: str) -> bool:
-        cutoff = time.time() - LOGIN_WINDOW_SECONDS
-        with self._connect() as conn:
-            conn.execute("DELETE FROM login_attempts WHERE attempted_at < ?", (cutoff,))
-            row = conn.execute(
-                "SELECT COUNT(*) AS n FROM login_attempts WHERE ip = ? AND attempted_at >= ?",
-                (ip, cutoff),
-            ).fetchone()
-        return bool(row) and int(row["n"]) >= LOGIN_MAX_ATTEMPTS
-
-    def record_login_failure(self, ip: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO login_attempts (ip, attempted_at) VALUES (?, ?)", (ip, time.time())
-            )
-
-    def clear_login_failures(self, ip: str) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM login_attempts WHERE ip = ?", (ip,))
-
-    # ---- inventory (supplies on hand per resource category) ----
-
-    def get_inventory(self) -> dict[str, int]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT category, quantity FROM inventory").fetchall()
-        return {row["category"]: int(row["quantity"]) for row in rows}
-
-    def set_inventory(self, quantities: dict[str, int]) -> dict[str, int]:
-        """Sets absolute stock levels for the listed categories (admin action)."""
-        with self._connect() as conn:
-            for category, quantity in quantities.items():
-                conn.execute(
-                    """
-                    INSERT INTO inventory (category, quantity) VALUES (?, ?)
-                    ON CONFLICT(category) DO UPDATE SET quantity = excluded.quantity
-                    """,
-                    (category, quantity),
-                )
-            rows = conn.execute("SELECT category, quantity FROM inventory").fetchall()
-        return {row["category"]: int(row["quantity"]) for row in rows}
-
-    @staticmethod
-    def _load_inventory(conn) -> dict[str, int]:
-        rows = conn.execute("SELECT category, quantity FROM inventory").fetchall()
-        return {row["category"]: int(row["quantity"]) for row in rows}
-
-    # ---- requests ----
-
-    def create_request(self, data: dict) -> dict:
-        request_id = f"REQ-{secrets.token_hex(4).upper()}"
-        submitted = iso(utc_now())
-        requested = data.get("resourceQuantities") or {}
-        with self._connect() as conn:
-            inventory = self._load_inventory(conn)
-            granted, user_message = plan_submission_grant(
-                requested, inventory, data["severity"]
-            )
-            conn.execute(
-                """
-                INSERT INTO requests (
-                    id, type, severity, affected_people, required_resources,
-                    location_name, latitude, longitude, status, submitted_at,
-                    resource_quantities, granted_resources, user_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-                """,
-                (
-                    request_id,
-                    data["type"],
-                    data["severity"],
-                    data["affectedPeople"],
-                    json.dumps(data["requiredResources"]),
-                    data["locationName"],
-                    data["latitude"],
-                    data["longitude"],
-                    submitted,
-                    json.dumps(requested),
-                    json.dumps(granted),
-                    user_message,
-                ),
-            )
-        return self.get_request(request_id)  # type: ignore[return-value]
-
-    def get_request(self, request_id: str) -> dict | None:
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone()
-        return self._to_dict(row) if row else None
-
-    def list_requests(self) -> list[dict]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM requests ORDER BY submitted_at DESC, id DESC LIMIT 1000"
-            ).fetchall()
-        return [self._to_dict(row) for row in rows]
-
-    def set_request_status(
-        self, request_id: str, status: str, message: str | None = None
-    ) -> dict:
-        """Records an admin decision and the message shown to the user.
-
-        On acceptance the requested quantities are allocated from current stock
-        (capped at what is on hand — the request never takes stock negative) and
-        the delivered amounts are stored in granted_resources.
-        """
-        decision_message = (message or "").strip() or DEFAULT_DECISION_MESSAGES[status]
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM requests WHERE id = ?", (request_id,)).fetchone()
-            if row is None:
-                raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
-            if row["status"] != "pending":
-                raise ApiError(
-                    f"Request {request_id} was already {row['status']}.", HTTPStatus.CONFLICT
-                )
-            requested = self._decode_json(row["resource_quantities"], {})
-            granted: dict[str, int] = {}
-            if status == "accepted" and requested:
-                inventory = self._load_inventory(conn)
-                for category, quantity in requested.items():
-                    available = inventory.get(category, 0)
-                    delivered = min(quantity, available)
-                    if delivered > 0:
-                        granted[category] = delivered
-                        inventory[category] = available - delivered
-                for category, quantity in inventory.items():
-                    conn.execute(
-                        "UPDATE inventory SET quantity = ? WHERE category = ?",
-                        (quantity, category),
-                    )
-                short = {
-                    category: (quantity, granted.get(category, 0))
-                    for category, quantity in requested.items()
-                    if granted.get(category, 0) < quantity
-                }
-                if short:
-                    detail = "; ".join(
-                        f"{delivered} of {quantity} {category}"
-                        for category, (quantity, delivered) in sorted(short.items())
-                    )
-                    decision_message += (
-                        " Supplies note: only the stock at this moment could be "
-                        f"provided — {detail}; this much only can be provided at the "
-                        "moment. The remainder follows when supplies are replenished."
-                    )
-            conn.execute(
-                """
-                UPDATE requests
-                SET status = ?, decided_at = ?, granted_resources = ?, decision_message = ?
-                WHERE id = ?
-                """,
-                (
-                    status,
-                    iso(utc_now()),
-                    json.dumps(granted),
-                    decision_message,
-                    request_id,
-                ),
-            )
-        updated = self.get_request(request_id)
-        if updated is None:  # pragma: no cover - defensive
-            raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
-        return updated
-
-    @staticmethod
-    def _decode_json(raw: object, fallback):
-        try:
-            return json.loads(raw) if raw is not None else fallback
-        except (TypeError, json.JSONDecodeError):
-            return fallback
-
-    @classmethod
-    def _to_dict(cls, row: sqlite3.Row) -> dict:
-        """Maps snake_case columns onto the camelCase shape docs/js expects."""
-        resources = cls._decode_json(row["required_resources"], [])
-        if not isinstance(resources, list):
-            resources = []
-        quantities = cls._decode_json(row["resource_quantities"], {})
-        if not isinstance(quantities, dict):
-            quantities = {}
-        granted = cls._decode_json(row["granted_resources"], {})
-        if not isinstance(granted, dict):
-            granted = {}
-
-        def as_counts(raw: dict) -> dict[str, int]:
-            counts: dict[str, int] = {}
-            for key, value in raw.items():
-                try:
-                    counts[str(key)] = int(value)
-                except (TypeError, ValueError):
-                    continue
-            return counts
-
-        return {
-            "id": row["id"],
-            "type": row["type"],
-            "severity": row["severity"],
-            "affectedPeople": int(row["affected_people"]),
-            "requiredResources": resources,
-            "resourceQuantities": as_counts(quantities),
-            "grantedResources": as_counts(granted),
-            "locationName": row["location_name"],
-            "latitude": float(row["latitude"]),
-            "longitude": float(row["longitude"]),
-            "status": row["status"],
-            "submittedAt": row["submitted_at"],
-            "decidedAt": row["decided_at"],
-            "userMessage": row["user_message"],
-            "decisionMessage": row["decision_message"],
-        }
-
-
-def plan_submission_grant(
-    requested: dict[str, int], available: dict[str, int], severity: str
-) -> tuple[dict[str, int], str | None]:
-    """Decides what the user is promised the moment they ask.
-
-    Returns ``(grantedResources, user_message)``. When the ask is beyond the
-    supplies on hand ("off the limits") and the situation is CRITICAL, the user
-    is granted at least the stock present at that moment and told exactly how
-    much that is. Non-critical over-limit asks get no automatic grant — they are
-    flagged for the admin, who decides what can be provided.
-    """
-    if not requested:
-        return {}, None
-    short = {
-        category: (quantity, available.get(category, 0))
-        for category, quantity in requested.items()
-        if quantity > available.get(category, 0)
-    }
-    if not short:
-        return dict(requested), None
-    if severity == "CRITICAL":
-        granted = {
-            category: min(quantity, available.get(category, 0))
-            for category, quantity in requested.items()
-        }
-        granted = {category: amount for category, amount in granted.items() if amount > 0}
-        detail = "; ".join(
-            f"{granted.get(category, 0)} of {quantity} {category} (in stock now: {stock})"
-            for category, (quantity, stock) in sorted(short.items())
-        )
-        message = (
-            "Critical situation: the supplies you asked for are beyond the limits "
-            f"of what is in stock right now. You are guaranteed at least the supplies "
-            f"present at this moment: {detail}. In other words, this much only can "
-            "be provided at the moment; the rest will be dispatched when supplies "
-            "are replenished."
-        )
-        return granted, message
-    detail = "; ".join(
-        f"{category}: asked {quantity}, in stock {stock}"
-        for category, (quantity, stock) in sorted(short.items())
-    )
-    message = (
-        "The supplies you asked for are beyond the limits of what is in stock "
-        f"right now ({detail}). Your request has been flagged for admin review; "
-        "an admin will decide what can be provided at the moment."
-    )
-    return {}, message
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
 
 
 def validate_decision_message(raw: object) -> str | None:
-    """Optional admin note delivered to the user with the decision."""
     if raw is None:
         return None
     if not isinstance(raw, str):
@@ -598,43 +135,57 @@ def validate_inventory_payload(raw: object) -> dict[str, int]:
     return quantities
 
 
+def _optional_text(raw: object, label: str, limit: int) -> str:
+    if raw is None:
+        return ""
+    if not isinstance(raw, (str, int, float)) or isinstance(raw, bool):
+        raise ApiError(f"{label} must be text.")
+    text = str(raw).strip()
+    if len(text) > limit:
+        raise ApiError(f"{label} is too long (max {limit} characters).")
+    return html.escape(text, quote=False)
+
+
 def validate_request_payload(raw: object) -> dict:
+    """Server-side validation for public submissions.
+
+    Invalid contact details are *not* rejected here: they are deliberately
+    accepted and surfaced as a risk signal for a human. Malformed or abusive
+    structure is rejected.
+    """
     if not isinstance(raw, dict):
         raise ApiError("Expected a JSON object.")
 
-    def field(name: str):
-        return raw.get(name)
-
-    disaster_type = str(field("type") or "").strip().upper()
+    disaster_type = str(raw.get("type") or "").strip().upper()
     if disaster_type not in DISASTER_TYPES:
         raise ApiError("Unknown disaster type.")
 
-    severity = str(field("severity") or "").strip().upper()
+    severity = str(raw.get("severity") or "").strip().upper()
     if severity not in SEVERITIES:
         raise ApiError("Severity must be CRITICAL, HIGH, MEDIUM or LOW.")
 
-    affected = field("affectedPeople")
+    affected = raw.get("affectedPeople")
     if isinstance(affected, bool) or not isinstance(affected, (int, float)):
         raise ApiError("Affected people must be a number.")
     affected_int = int(affected)
     if affected_int < 0 or affected_int > 1_000_000_000:
         raise ApiError("Affected people cannot be negative.")
 
-    location = str(field("locationName") or "").strip()
+    location = str(raw.get("locationName") or "").strip()
     if not location:
         raise ApiError("Location name is required.")
     if len(location) > 200:
         raise ApiError("Location name is too long (max 200 characters).")
 
-    latitude = field("latitude")
-    longitude = field("longitude")
+    latitude = raw.get("latitude")
+    longitude = raw.get("longitude")
     for value, label, bound in ((latitude, "Latitude", 90.0), (longitude, "Longitude", 180.0)):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ApiError(f"{label} must be a number.")
         if not (-bound <= float(value) <= bound):
             raise ApiError(f"{label} must be between {-bound} and {bound}.")
 
-    resources_raw = field("requiredResources")
+    resources_raw = raw.get("requiredResources")
     if resources_raw is None:
         resources_raw = []
     if not isinstance(resources_raw, list) or len(resources_raw) > len(RESOURCE_CATEGORIES):
@@ -647,9 +198,7 @@ def validate_request_payload(raw: object) -> dict:
         if value not in resources:
             resources.append(value)
 
-    # Quantities are optional; the form used to send categories only. A category
-    # with a quantity is always part of requiredResources as well.
-    quantities_raw = field("resourceQuantities")
+    quantities_raw = raw.get("resourceQuantities")
     if quantities_raw is None:
         quantities_raw = {}
     if not isinstance(quantities_raw, dict) or len(quantities_raw) > len(RESOURCE_CATEGORIES):
@@ -670,6 +219,27 @@ def validate_request_payload(raw: object) -> dict:
         if name not in resources:
             resources.append(name)
 
+    description = str(raw.get("description") or "").strip()
+    if len(description) > MAX_DESCRIPTION_LENGTH:
+        raise ApiError(f"Description is too long (max {MAX_DESCRIPTION_LENGTH} characters).")
+
+    contact_name = _optional_text(raw.get("contactName"), "Contact name", 120)
+    contact_phone = _optional_text(raw.get("contactPhone"), "Contact phone", 40)
+    contact_email = _optional_text(raw.get("contactEmail"), "Contact email", 160)
+
+    evidence_raw = raw.get("evidence")
+    if evidence_raw is None:
+        evidence_raw = []
+    if not isinstance(evidence_raw, list) or len(evidence_raw) > MAX_EVIDENCE_FILES:
+        raise ApiError(f"At most {MAX_EVIDENCE_FILES} supporting files can be attached.")
+    evidence: list[str] = []
+    for item in evidence_raw:
+        value = str(item).strip()
+        if not value or len(value) > 40 or not value.startswith("EV-"):
+            raise ApiError("Invalid evidence reference.")
+        if value not in evidence:
+            evidence.append(value)
+
     return {
         "type": disaster_type,
         "severity": severity,
@@ -679,33 +249,201 @@ def validate_request_payload(raw: object) -> dict:
         "locationName": html.escape(location, quote=False),
         "latitude": float(latitude),
         "longitude": float(longitude),
+        "description": html.escape(description, quote=False),
+        "contactName": contact_name,
+        "contactPhone": contact_phone,
+        "contactEmail": contact_email,
+        "evidence": evidence,
     }
 
 
-class DrrasHandler(SimpleHTTPRequestHandler):
-    """Static files out of ``docs/`` plus the JSON API, on one origin."""
+def validate_settings_payload(raw: object) -> dict:
+    if not isinstance(raw, dict):
+        raise ApiError("Expected a JSON object.")
+    updates: dict = {}
+    if "autoApproveEnabled" in raw:
+        if not isinstance(raw["autoApproveEnabled"], bool):
+            raise ApiError("autoApproveEnabled must be true or false.")
+        updates["autoApproveEnabled"] = raw["autoApproveEnabled"]
+    if "autoApproveMaxRisk" in raw:
+        value = raw["autoApproveMaxRisk"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= int(value) <= 100:
+            raise ApiError("autoApproveMaxRisk must be a number between 0 and 100.")
+        updates["autoApproveMaxRisk"] = int(value)
+    if "autoApproveSeverities" in raw:
+        values = raw["autoApproveSeverities"]
+        if not isinstance(values, list):
+            raise ApiError("autoApproveSeverities must be a list.")
+        cleaned = [str(item).strip().upper() for item in values]
+        if any(item not in SEVERITIES for item in cleaned):
+            raise ApiError("Unknown severity in autoApproveSeverities.")
+        updates["autoApproveSeverities"] = cleaned
+    if "autoApproveMinDescriptionLength" in raw:
+        value = raw["autoApproveMinDescriptionLength"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= int(value) <= 2000:
+            raise ApiError("autoApproveMinDescriptionLength must be between 0 and 2000.")
+        updates["autoApproveMinDescriptionLength"] = int(value)
+    if "autoApproveRequireContact" in raw:
+        if not isinstance(raw["autoApproveRequireContact"], bool):
+            raise ApiError("autoApproveRequireContact must be true or false.")
+        updates["autoApproveRequireContact"] = raw["autoApproveRequireContact"]
+    if "duplicateBlockAutoApprove" in raw:
+        if not isinstance(raw["duplicateBlockAutoApprove"], bool):
+            raise ApiError("duplicateBlockAutoApprove must be true or false.")
+        updates["duplicateBlockAutoApprove"] = raw["duplicateBlockAutoApprove"]
+    for key, low, high in (
+        ("duplicateWindowHours", 1, 720),
+        ("duplicateThreshold", 0, 100),
+        ("mediumRiskThreshold", 0, 100),
+        ("highRiskThreshold", 0, 100),
+        ("submissionRateLimit", 1, 1000),
+        ("submissionRateWindowMinutes", 1, 1440),
+    ):
+        if key in raw:
+            value = raw[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= int(value) <= high:
+                raise ApiError(f"{key} must be a number between {low} and {high}.")
+            updates[key] = int(value)
+    if "routingProvider" in raw:
+        if raw["routingProvider"] != "osrm":
+            raise ApiError("The only supported routing provider is 'osrm'.")
+        updates["routingProvider"] = "osrm"
+    if not updates:
+        raise ApiError("No recognised settings were supplied.")
+    return updates
 
-    server_version = "DRRAS/1.0"
-    # HTTP/1.1 keeps the browser's connections alive; every response below sets
-    # an explicit Content-Length, which keep-alive requires.
+
+def validate_help_centre_payload(raw: object, *, require_all: bool = True) -> dict:
+    if not isinstance(raw, dict):
+        raise ApiError("Expected a JSON object.")
+    payload: dict = {}
+    if "name" in raw or require_all:
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            raise ApiError("Centre name is required.")
+        if len(name) > 160:
+            raise ApiError("Centre name is too long.")
+        payload["name"] = html.escape(name, quote=False)
+    if "category" in raw or require_all:
+        category = str(raw.get("category") or "").strip()
+        if category not in HELP_CENTRE_CATEGORIES:
+            raise ApiError("Unknown help-centre category.")
+        payload["category"] = category
+    if "availability" in raw or require_all:
+        availability = str(raw.get("availability") or "available").strip()
+        if availability not in CENTRE_AVAILABILITY:
+            raise ApiError("Unknown availability status.")
+        payload["availability"] = availability
+    if "latitude" in raw or require_all:
+        try:
+            latitude = float(raw.get("latitude"))
+            longitude = float(raw.get("longitude"))
+        except (TypeError, ValueError):
+            raise ApiError("Latitude and longitude are required.") from None
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            raise ApiError("Coordinates are out of range.")
+        payload["latitude"] = latitude
+        payload["longitude"] = longitude
+    for key, limit in (("address", 240), ("phone", 40), ("capacityNote", 240), ("notes", 400)):
+        if key in raw:
+            payload[key] = _optional_text(raw.get(key), key, limit)
+    if "stock" in raw:
+        stock = raw["stock"]
+        if not isinstance(stock, dict):
+            raise ApiError("stock must be an object of category: amount pairs.")
+        cleaned: dict[str, int] = {}
+        for category, amount in stock.items():
+            if category not in RESOURCE_CATEGORIES:
+                raise ApiError(f"Unknown resource category: {category}")
+            if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+                raise ApiError(f"Quantity for {category} must be a number.")
+            value = int(amount)
+            if value < 0 or value > MAX_RESOURCE_QUANTITY:
+                raise ApiError(f"Quantity for {category} must be zero or more.")
+            cleaned[category] = value
+        payload["stock"] = cleaned
+    return payload
+
+
+def validate_evidence_payload(raw: object) -> tuple[str, str, bytes]:
+    if not isinstance(raw, dict):
+        raise ApiError("Expected a JSON object.")
+    file_name = str(raw.get("fileName") or "evidence").strip()[:120]
+    mime_type = str(raw.get("mimeType") or "").strip().lower()
+    if mime_type not in EVIDENCE_ALLOWED_TYPES:
+        raise ApiError("Only JPEG, PNG or PDF files can be attached.")
+    encoded = raw.get("data")
+    if not isinstance(encoded, str) or not encoded:
+        raise ApiError("The uploaded file is missing.")
+    if len(encoded) > int(EVIDENCE_MAX_BYTES * 1.4):
+        raise ApiError("Each file must be 5 MB or smaller.", 413)
+    try:
+        binary = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise ApiError("The uploaded file is not valid base64.") from None
+    return file_name or "evidence", mime_type, binary
+
+
+def validate_allocation_items(raw: object) -> dict[str, int]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not raw:
+        raise ApiError("Choose at least one resource to allocate.")
+    items: dict[str, int] = {}
+    for category, amount in raw.items():
+        if category not in RESOURCE_CATEGORIES:
+            raise ApiError(f"Unknown resource category: {category}")
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            raise ApiError(f"Quantity for {category} must be a number.")
+        value = int(amount)
+        if value <= 0 or value > MAX_RESOURCE_QUANTITY:
+            raise ApiError(f"Quantity for {category} must be a positive number.")
+        items[category] = value
+    return items
+
+
+def _query_arg(query: dict, name: str, default=None):
+    values = query.get(name)
+    if not values:
+        return default
+    return values[0]
+
+
+def _float_arg(query: dict, name: str, *, required: bool = True) -> float | None:
+    raw = _query_arg(query, name)
+    if raw is None or raw == "":
+        if required:
+            raise ApiError(f"Missing '{name}'.")
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise ApiError(f"'{name}' must be a number.") from None
+
+
+# ---------------------------------------------------------------------------
+# HTTP handler
+# ---------------------------------------------------------------------------
+
+
+class DrrasHandler(SimpleHTTPRequestHandler):
+    server_version = "DRRAS/2.0"
     protocol_version = "HTTP/1.1"
-    store: Store  # attached by the factory below
+    store: Store
     cookie_secure = False
     cookie_samesite = COOKIE_SAMESITE_DEFAULT
     cookie_partitioned = False
-    # Off by default: a token the page can read is a wider XSS surface than an
-    # HttpOnly cookie, so normal deployments keep the cookie. Opt in only when the
-    # app is embedded and the browser will not carry cookies across sites.
     allow_bearer_auth = False
-    # Fail closed: if a request never authenticates, CSRF is still enforced.
     auth_source = "cookie"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, directory=str(STATIC_ROOT), **kwargs)
+        self._body = b""
+        self.auth_role: str | None = None
 
-    # ---- helpers ----
+    # ---- plumbing ----
 
-    def log_message(self, fmt: str, *args) -> None:  # keep stdout tidy
+    def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     def _send_json(self, payload: dict, status: int = HTTPStatus.OK, extra_headers=None) -> None:
@@ -715,21 +453,17 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
         for name, value in extra_headers or ():
             self.send_header(name, value)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def drain_body(self) -> None:
-        """Read the whole request body before anything else.
+    def _send_error_json(self, message: str, status: int) -> None:
+        self._send_json({"error": message}, status)
 
-        Every request path must drain the socket, including the ones that reject
-        the call: BaseHTTPRequestHandler reuses this connection for the next
-        request, so leftover body bytes would be parsed as its request line and
-        answered as a bogus method (501) - request desynchronisation, not a
-        4xx. Reading first and deciding second keeps the stream aligned.
-        """
+    def drain_body(self) -> None:
         self._body = b""
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -739,19 +473,17 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         if length <= 0:
             return
         if length > HARD_BODY_CAP:
-            # Refuse and drop the connection rather than read it or leave it.
             self.close_connection = True
             raise ApiError("Request body is too large.", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         self._body = self.rfile.read(length)
         if len(self._body) < length:
-            # Client promised more than it sent; the stream is no longer trustworthy.
             self.close_connection = True
 
-    def _read_json(self) -> object:
+    def _read_json(self, limit: int = MAX_BODY_BYTES) -> object:
         raw = getattr(self, "_body", b"")
         if not raw:
             return {}
-        if len(raw) > MAX_BODY_BYTES:
+        if len(raw) > limit:
             raise ApiError("Request body is too large.", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         try:
             return json.loads(raw.decode("utf-8"))
@@ -771,13 +503,6 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         return morsel.value if morsel else ""
 
     def _credential(self) -> tuple[str, str]:
-        """Resolves the caller to (token, source).
-
-        An explicit Authorization header wins over the cookie. That is the only
-        credential that survives an embedded frame on a browser which refuses
-        third-party cookies, where login succeeds but every following call
-        arrives without the session cookie and reads as "expired".
-        """
         auth = self.headers.get("Authorization", "")
         if self.allow_bearer_auth and auth[:7].lower() == "bearer ":
             candidate = auth[7:].strip()
@@ -786,20 +511,25 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         return self._cookie_token(), "cookie"
 
     def _session_token(self) -> str:
-        """Just the token, whichever transport carried it."""
         return self._credential()[0]
 
-    def _require_admin(self) -> sqlite3.Row:
+    def _require_admin(self, allowed_roles: tuple[str, ...] | None = None):
         token, source = self._credential()
         session = self.store.get_session(token)
         if session is None:
+            self.auth_role = None
             raise ApiError("Your admin session has expired. Sign in again.", HTTPStatus.UNAUTHORIZED)
         self.auth_source = source
+        role = session["role"] if "role" in session.keys() else "admin"
+        self.auth_role = role or "admin"
+        if allowed_roles and self.auth_role not in allowed_roles:
+            raise ApiError(
+                f"Your role ({self.auth_role}) is not allowed to perform this action.",
+                HTTPStatus.FORBIDDEN,
+            )
         return session
 
     def _require_csrf(self) -> None:
-        # A cross-site form cannot set custom headers, and the bearer token is not
-        # attached automatically by the browser, so CSRF is already guaranteed.
         if self.auth_source == "bearer":
             return
         token = self._session_token()
@@ -821,24 +551,20 @@ class DrrasHandler(SimpleHTTPRequestHandler):
             f"SameSite={self.cookie_samesite}",
             f"Max-Age={max_age}",
         ]
-        # Browsers reject SameSite=None unless the cookie is also Secure, and
-        # Secure cookies are dropped on plain http (except http://localhost).
         if self.cookie_secure or self.cookie_samesite == "None":
             parts.append("Secure")
-        # CHIPS: Partitioned is only valid alongside SameSite=None; Secure, and
-        # it is what lets the session survive inside a cross-site iframe when the
-        # browser blocks ordinary third-party cookies.
         if self.cookie_partitioned and self.cookie_samesite == "None":
             parts.append("Partitioned")
         return "; ".join(parts)
 
     # ---- routing ----
 
-    def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
-        path = self.path.split("?", 1)[0]
-        if path.startswith("/api/"):
-            self._route_get(path)
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/"):
+            self._guard(lambda: self._route_get(parsed.path, parse_qs(parsed.query)))
             return
+        path = parsed.path
         if path in ("/admin", "/admin/"):
             self.path = "/admin.html"
         elif path == "/":
@@ -850,183 +576,481 @@ class DrrasHandler(SimpleHTTPRequestHandler):
         self.do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
-        try:
-            self.drain_body()
-        except ApiError as err:
-            self._send_json({"error": err.message}, err.status)
-            return
-        self._route_post(self.path.split("?", 1)[0])
+        parsed = urlparse(self.path)
+        self._guard(lambda: self._handle_body("POST", parsed))
 
     def do_PATCH(self) -> None:  # noqa: N802
-        try:
-            self.drain_body()
-        except ApiError as err:
-            self._send_json({"error": err.message}, err.status)
-            return
-        self._route_patch(self.path.split("?", 1)[0])
+        parsed = urlparse(self.path)
+        self._guard(lambda: self._handle_body("PATCH", parsed))
 
     def do_PUT(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        self._guard(lambda: self._handle_body("PUT", parsed))
+
+    def _handle_body(self, method: str, parsed) -> None:
         try:
             self.drain_body()
         except ApiError as err:
-            self._send_json({"error": err.message}, err.status)
+            self._send_error_json(err.message, err.status)
             return
-        self._route_put(self.path.split("?", 1)[0])
+        if method == "POST":
+            self._route_post(parsed.path, parse_qs(parsed.query))
+        elif method == "PATCH":
+            self._route_patch(parsed.path)
+        else:
+            self._route_put(parsed.path)
+
+    def _guard(self, operation) -> None:
+        """Converts ApiError (and unexpected failures) into a JSON response."""
+        try:
+            operation()
+        except ApiError as err:
+            self._send_error_json(err.message, err.status)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        except Exception:  # pragma: no cover - defensive
+            traceback.print_exc()
+            self._send_error_json(
+                "The server hit an unexpected error. Please try again.", HTTPStatus.INTERNAL_SERVER_ERROR
+            )
 
     def end_headers(self) -> None:
-        # Entry documents must always revalidate: a cached admin.html keeps
-        # pointing at an old admin.js, and the page then behaves like the fix
-        # never landed.
         if getattr(self, "_revalidate_html", False):
             self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
     def _serve_static(self) -> None:
         if not STATIC_ROOT.is_dir():
-            self._send_json({"error": "Static site folder docs/ is missing."}, HTTPStatus.NOT_FOUND)
+            self._send_error_json("Static site folder docs/ is missing.", HTTPStatus.NOT_FOUND)
             return
         super().do_GET()
 
     # ---- API: read ----
 
-    def _route_get(self, path: str) -> None:
-        try:
-            if path == "/api/health":
-                self._send_json({"status": "ok", "passwordConfigured": self.store.has_password()})
-                return
-            if path == "/api/admin/session":
-                session = self._require_admin()
-                payload = {"authenticated": True, "csrfToken": session["csrf_token"]}
-                if self.auth_source == "bearer":
-                    payload["sessionToken"] = self._session_token()
-                self._send_json(payload)
-                return
-            if path == "/api/admin/requests":
-                self._require_admin()
-                self._send_json({"requests": self.store.list_requests()})
-                return
-            if path.startswith("/api/admin/requests/"):
-                self._require_admin()
-                request_id = unquote(path.rsplit("/", 1)[-1])
-                record = self.store.get_request(request_id)
-                if record is None:
-                    raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
-                self._send_json({"request": record})
-                return
-            # Public endpoint: users can check their own request status by ID
-            if path.startswith("/api/requests/"):
-                request_id = unquote(path.rsplit("/", 1)[-1])
-                record = self.store.get_request(request_id)
-                if record is None:
-                    raise ApiError("That request was not found.", HTTPStatus.NOT_FOUND)
-                self._send_json({"request": record})
-                return
-            # Public endpoint: supplies currently on hand (lets the form show
-            # what is actually available before someone asks for more).
-            if path == "/api/inventory":
-                self._send_json({"inventory": self.store.get_inventory()})
-                return
-            if path == "/api/admin/inventory":
-                self._require_admin()
-                self._send_json({"inventory": self.store.get_inventory()})
-                return
-            raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
-        except ApiError as err:
-            self._send_json({"error": err.message}, err.status)
-
-    # ---- API: create / auth ----
-
-    def _route_post(self, path: str) -> None:
-        try:
-            if path == "/api/requests":
-                payload = validate_request_payload(self._read_json())
-                self._send_json({"request": self.store.create_request(payload)}, HTTPStatus.CREATED)
-                return
-            if path == "/api/admin/login":
-                self._handle_login()
-                return
-            if path == "/api/admin/logout":
-                self._require_admin()
-                self._require_csrf()
-                self.store.delete_session(self._session_token())
-                self._send_json(
-                    {"ok": True},
-                    extra_headers=[("Set-Cookie", self._cookie("", 0))],
-                )
-                return
-            raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
-        except ApiError as err:
-            self._send_json({"error": err.message}, err.status)
-
-    def _handle_login(self) -> None:
-        ip = self._client_ip()
-        if self.store.too_many_login_attempts(ip):
-            raise ApiError(
-                "Too many failed sign-in attempts. Try again in a few minutes.",
-                HTTPStatus.TOO_MANY_REQUESTS,
+    def _route_get(self, path: str, query: dict) -> None:
+        if path == "/api/health":
+            self._send_json({
+                "status": "ok",
+                "passwordConfigured": self.store.has_password(),
+                "service": "DRRAS",
+                "version": "2.0",
+                "demoData": self._has_demo_data(),
+                "routing": routing_status(),
+            })
+            return
+        if path == "/api/overview":
+            self._send_json(self.store.public_overview())
+            return
+        if path == "/api/help-centres":
+            centres = self.store.list_help_centres()
+            self._send_json({"centres": centres, "categories": HELP_CENTRE_CATEGORIES})
+            return
+        if path == "/api/nearby":
+            latitude = _float_arg(query, "lat")
+            longitude = _float_arg(query, "lon")
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                raise ApiError("Coordinates are out of range.")
+            category = _query_arg(query, "category", "all")
+            if category not in HELP_CENTRE_CATEGORIES and category not in (None, "all"):
+                raise ApiError("Unknown help-centre category.")
+            availability = _query_arg(query, "availability", "all")
+            resource = _query_arg(query, "resource", "all")
+            if resource not in RESOURCE_CATEGORIES and resource not in (None, "all"):
+                raise ApiError("Unknown resource category.")
+            radius = _float_arg(query, "radius", required=False)
+            if radius is not None and not (0 < radius <= 200):
+                raise ApiError("Radius must be between 0 and 200 km.")
+            try:
+                limit = int(_query_arg(query, "limit", 20))
+            except (TypeError, ValueError):
+                raise ApiError("limit must be a number.") from None
+            payload = self.store.nearby_centres(
+                latitude, longitude, category=category, radius_km=radius,
+                availability=availability, resource=resource, limit=max(1, min(limit, 50)),
             )
-        if not self.store.has_password():
+            self._send_json(payload)
+            return
+        if path == "/api/places":
+            q = str(_query_arg(query, "q", "") or "").strip()
+            if len(q) < 2:
+                raise ApiError("Enter at least two characters to search.")
+            if len(q) > 120:
+                raise ApiError("Search text is too long.")
+            self._send_json({"results": self.store.search_places(q)})
+            return
+        if path == "/api/route":
+            try:
+                origin_lat = float(_query_arg(query, "fromLat"))
+                origin_lon = float(_query_arg(query, "fromLon"))
+                dest_lat = float(_query_arg(query, "toLat"))
+                dest_lon = float(_query_arg(query, "toLon"))
+            except (TypeError, ValueError):
+                raise ApiError("Four coordinates are required: fromLat, fromLon, toLat, toLon.") from None
+            for lat, lon in ((origin_lat, origin_lon), (dest_lat, dest_lon)):
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    raise ApiError("Coordinates are out of range.")
+            self._send_json(self.store.route_between((origin_lat, origin_lon), (dest_lat, dest_lon)))
+            return
+        if path == "/api/inventory":
+            self._send_json({"inventory": self.store.get_inventory()})
+            return
+        if path.startswith("/api/requests/"):
+            request_id = unquote(path.rsplit("/", 1)[-1])
+            record = self.store.get_public_request(request_id)
+            if record is None:
+                raise ApiError("That request was not found.", HTTPStatus.NOT_FOUND)
+            self._send_json({"request": record})
+            return
+
+        # ---- admin reads ----
+        if path == "/api/admin/session":
+            session = self._require_admin()
+            payload = {
+                "authenticated": True,
+                "csrfToken": session["csrf_token"],
+                "role": self.auth_role,
+            }
+            if self.auth_source == "bearer":
+                payload["sessionToken"] = self._session_token()
+            self._send_json(payload)
+            return
+        if path == "/api/admin/requests":
+            self._require_admin()
+            self._send_json({"requests": self.store.list_requests()})
+            return
+        if path.startswith("/api/admin/requests/") and path.endswith("/recommendations"):
+            self._require_admin()
+            request_id = unquote(path.split("/")[-2])
+            self._send_json(self.store.allocation_recommendations(request_id))
+            return
+        if path.startswith("/api/admin/requests/"):
+            self._require_admin()
+            request_id = unquote(path.rsplit("/", 1)[-1])
+            record = self.store.get_request(request_id)
+            if record is None:
+                raise ApiError("That request no longer exists.", HTTPStatus.NOT_FOUND)
+            self._send_json({"request": record})
+            return
+        if path == "/api/admin/stats":
+            self._require_admin()
+            self._send_json(self.store.admin_stats())
+            return
+        if path == "/api/admin/audit":
+            self._require_admin()
+            try:
+                limit = int(_query_arg(query, "limit", 300))
+            except (TypeError, ValueError):
+                raise ApiError("limit must be a number.") from None
+            request_id = _query_arg(query, "requestId")
+            self._send_json({
+                "audit": self.store.list_audit(limit=max(1, min(limit, 1000)), request_id=request_id)
+            })
+            return
+        if path == "/api/admin/notifications":
+            self._require_admin()
+            self._send_json({"notifications": self.store.list_notifications()})
+            return
+        if path == "/api/admin/allocations":
+            self._require_admin()
+            self._send_json({"allocations": self.store.list_allocations()})
+            return
+        if path == "/api/admin/help-centres":
+            self._require_admin()
+            self._send_json({
+                "centres": self.store.list_help_centres(),
+                "categories": HELP_CENTRE_CATEGORIES,
+            })
+            return
+        if path == "/api/admin/inventory":
+            self._require_admin()
+            self._send_json({"inventory": self.store.get_inventory()})
+            return
+        if path == "/api/admin/settings":
+            self._require_admin()
+            self._send_json({
+                "settings": self.store.get_settings(),
+                "defaults": DEFAULT_SETTINGS,
+                "routing": routing_status(),
+            })
+            return
+        if path.startswith("/api/admin/evidence/"):
+            self._require_admin()
+            evidence_id = unquote(path.rsplit("/", 1)[-1])
+            found = self.store.get_evidence(evidence_id)
+            if found is None:
+                raise ApiError("That file was not found.", HTTPStatus.NOT_FOUND)
+            row, file_path = found
+            data = file_path.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", row["mime_type"])
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'inline; filename="{row["stored_name"]}"')
+            self.send_header("Cache-Control", "private, no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(data)
+            return
+        raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
+
+    def _has_demo_data(self) -> bool:
+        try:
+            with self.store._connect() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM requests WHERE is_demo = 1"
+                ).fetchone()
+            return bool(row and int(row["n"]) > 0)
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    # ---- API: public submissions ----
+
+    def _route_post(self, path: str, query: dict) -> None:
+        if path == "/api/requests":
+            ip = self._client_ip()
+            settings = self.store.get_settings()
+            if ip not in LOOPBACK_IPS and self.store.check_submission_rate(
+                ip,
+                int(settings.get("submissionRateLimit", 6)),
+                int(settings.get("submissionRateWindowMinutes", 10)),
+            ):
+                raise ApiError(
+                    "Too many reports from this connection. Please wait a few minutes or call 112 "
+                    "if this is an emergency.",
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                )
+            payload = validate_request_payload(self._read_json())
+            if ip not in LOOPBACK_IPS:
+                self.store.record_submission_attempt(ip)
+            evidence = payload.pop("evidence", [])
+            record = self.store.submit_request(
+                payload, client_ip=ip, evidence_ids=evidence
+            )
+            public = self.store.get_public_request(unquote(record["id"]))
+            if public is None:  # pragma: no cover - defensive
+                raise ApiError("The request could not be saved.", 500)
+            public["status"] = record["status"]
+            public["grantedResources"] = record["grantedResources"]
+            public["userMessage"] = record["userMessage"]
+            self._send_json(
+                {
+                    "request": public,
+                    "verification": {
+                        "queue": record["verificationQueue"],
+                        "workflowStatus": record["workflowStatus"],
+                        "summary": public["verification"]["summary"],
+                    },
+                },
+                HTTPStatus.CREATED,
+            )
+            return
+        if path == "/api/uploads":
+            ip = self._client_ip()
+            if ip not in LOOPBACK_IPS and self.store.check_submission_rate(ip, 20, 10):
+                raise ApiError("Too many uploads from this connection.", HTTPStatus.TOO_MANY_REQUESTS)
+            file_name, mime_type, binary = validate_evidence_payload(
+                self._read_json(MAX_UPLOAD_BODY_BYTES)
+            )
+            evidence = self.store.add_evidence(file_name, mime_type, binary)
+            self._send_json({"evidence": evidence}, HTTPStatus.CREATED)
+            return
+        if path == "/api/admin/login":
+            self._login()
+            return
+        if path == "/api/admin/logout":
+            self._require_admin()
+            self._require_csrf()
+            self.store.delete_session(self._session_token())
+            self._send_json(
+                {"ok": True},
+                extra_headers=[("Set-Cookie", self._cookie("", 0))],
+            )
+            return
+
+        # ---- admin mutations ----
+        self._require_admin()
+        self._require_csrf()
+
+        if path.startswith("/api/admin/requests/") and path.endswith("/action"):
+            request_id = unquote(path.split("/")[-2])
+            body = self._read_json()
+            if not isinstance(body, dict):
+                raise ApiError("Expected a JSON object.")
+            action = str(body.get("action") or "").strip()
+            if not action:
+                raise ApiError("An action is required.")
+            reason = validate_decision_message(body.get("reason"))
+            message = validate_decision_message(body.get("message"))
+            updated = self.store.apply_action(
+                request_id, action, actor="admin", role=self.auth_role or "admin",
+                reason=reason, message=message,
+                target_id=(str(body["targetId"]) if body.get("targetId") else None),
+            )
+            self._send_json({"request": updated})
+            return
+        if path.startswith("/api/admin/requests/") and path.endswith("/allocations"):
+            request_id = unquote(path.split("/")[-2])
+            body = self._read_json()
+            if not isinstance(body, dict):
+                raise ApiError("Expected a JSON object.")
+            centre_id = str(body.get("centreId") or "").strip()
+            if not centre_id:
+                raise ApiError("Choose a help centre.")
+            items = validate_allocation_items(body.get("items"))
+            distance = body.get("distance") if isinstance(body.get("distance"), dict) else None
+            override_reason = validate_decision_message(body.get("overrideReason"))
+            updated = self.store.allocate(
+                request_id, centre_id, items=items,
+                actor="admin", role=self.auth_role or "admin",
+                override_reason=override_reason, distance=distance,
+            )
+            self._send_json({"request": updated}, HTTPStatus.CREATED)
+            return
+        if path == "/api/admin/seed-demo":
+            self._require_role("admin")
+            self._send_json(self.store.seed_demo())
+            return
+        if path == "/api/admin/help-centres":
+            self._require_role("admin")
+            payload = validate_help_centre_payload(self._read_json(), require_all=True)
+            centre = self.store.create_help_centre(
+                payload, actor="admin", role=self.auth_role or "admin"
+            )
+            self._send_json({"centre": centre}, HTTPStatus.CREATED)
+            return
+        raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
+
+    def _require_role(self, role: str) -> None:
+        self._require_admin((role,))
+
+    def _login(self) -> None:
+        ip = self._client_ip()
+        if self.store.too_many_login_attempts(ip, LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_SECONDS):
             raise ApiError(
-                "No admin password is configured. Run: python3 backend/admin_server.py --set-password",
-                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Too many failed sign-in attempts. Wait 15 minutes and try again.",
+                HTTPStatus.TOO_MANY_REQUESTS,
             )
         body = self._read_json()
         password = body.get("password") if isinstance(body, dict) else None
-        if not isinstance(password, str) or not self.store.verify_password(password):
+        if not self.store.has_password() or not isinstance(password, str):
+            self.store.record_login_failure(ip)
+            raise ApiError("Incorrect password.", HTTPStatus.UNAUTHORIZED)
+        role = self.store.authenticate(password)
+        if role is None:
             self.store.record_login_failure(ip)
             raise ApiError("Incorrect password.", HTTPStatus.UNAUTHORIZED)
         self.store.clear_login_failures(ip)
-        token, csrf = self.store.create_session()
+        token, csrf = self.store.create_session(role)
         max_age = int(SESSION_LIFETIME.total_seconds())
-        payload: dict = {"ok": True, "csrfToken": csrf}
+        body: dict = {"ok": True, "csrfToken": csrf, "role": role}
         if self.allow_bearer_auth:
-            # Clients that cannot use cookies (embedded frames under third-party
-            # cookie blocking) authenticate with this instead.
-            payload["sessionToken"] = token
-            payload["authMode"] = "bearer"
-        self._send_json(
-            payload,
-            extra_headers=[("Set-Cookie", self._cookie(token, max_age))],
-        )
+            body["sessionToken"] = token
+            body["authMode"] = "bearer"
+        self._send_json(body, extra_headers=[("Set-Cookie", self._cookie(token, max_age))])
 
-    # ---- API: decisions ----
+    # ---- API: decisions (legacy PATCH + new allocation/centre updates) ----
 
     def _route_patch(self, path: str) -> None:
-        try:
-            self._require_admin()
-            self._require_csrf()
-            if not path.startswith("/api/admin/requests/"):
-                raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
+        self._require_admin()
+        self._require_csrf()
+        if path.startswith("/api/admin/requests/"):
             request_id = unquote(path.rsplit("/", 1)[-1])
             body = self._read_json()
             if not isinstance(body, dict):
                 raise ApiError("Expected a JSON object.")
             status = str(body.get("status") or "").strip().lower()
-            if status not in ("accepted", "rejected"):
-                raise ApiError("Status must be 'accepted' or 'rejected'.")
             message = validate_decision_message(body.get("message"))
-            self._send_json(
-                {"request": self.store.set_request_status(request_id, status, message)}
+            reason = validate_decision_message(body.get("reason"))
+            if status in ("accepted", "approved"):
+                if status == "accepted":
+                    updated = self.store.approve_request(
+                        request_id, message=message, reason=reason,
+                        actor="admin", role=self.auth_role or "admin",
+                        deduct_reserve=True, legacy=True,
+                    )
+                else:
+                    updated = self.store.approve_request(
+                        request_id, message=message, reason=reason,
+                        actor="admin", role=self.auth_role or "admin",
+                    )
+            elif status in ("rejected",):
+                updated = self.store.reject_request(
+                    request_id, message=message, reason=reason,
+                    actor="admin", role=self.auth_role or "admin", legacy=True,
+                )
+            elif status in ("request_info", "info_requested"):
+                updated = self.store.request_info(
+                    request_id, reason=reason or message or "Additional information required.",
+                    actor="admin", role=self.auth_role or "admin",
+                )
+            elif status in ("flagged", "flag"):
+                updated = self.store.flag_request(
+                    request_id, reason=reason or message or "Flagged for review.",
+                    actor="admin", role=self.auth_role or "admin",
+                )
+            else:
+                raise ApiError("Status must be 'accepted' or 'rejected'.")
+            self._send_json({"request": updated})
+            return
+        if path.startswith("/api/admin/allocations/"):
+            allocation_id = unquote(path.rsplit("/", 1)[-1])
+            body = self._read_json()
+            if not isinstance(body, dict):
+                raise ApiError("Expected a JSON object.")
+            status = str(body.get("status") or "").strip().lower()
+            if status not in ALLOCATION_STATUSES:
+                raise ApiError("Unknown allocation status.")
+            reason = validate_decision_message(body.get("reason"))
+            allocation = self.store.update_allocation_status(
+                allocation_id, status, actor="admin", role=self.auth_role or "admin",
+                reason=reason,
             )
-        except ApiError as err:
-            self._send_json({"error": err.message}, err.status)
+            self._send_json({"allocation": allocation})
+            return
+        if path.startswith("/api/admin/help-centres/"):
+            self._require_role("admin")
+            centre_id = unquote(path.rsplit("/", 1)[-1])
+            updates = validate_help_centre_payload(self._read_json(), require_all=False)
+            if not updates:
+                raise ApiError("No changes were supplied.")
+            centre = self.store.update_help_centre(
+                centre_id, updates, actor="admin", role=self.auth_role or "admin"
+            )
+            self._send_json({"centre": centre})
+            return
+        raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
 
-    # ---- API: inventory ----
+    # ---- API: settings / inventory ----
 
     def _route_put(self, path: str) -> None:
-        try:
-            self._require_admin()
-            self._require_csrf()
-            if path != "/api/admin/inventory":
-                raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
+        self._require_admin()
+        self._require_csrf()
+        if path == "/api/admin/inventory":
+            self._require_role("admin")
             quantities = validate_inventory_payload(self._read_json())
-            self._send_json({"inventory": self.store.set_inventory(quantities)})
-        except ApiError as err:
-            self._send_json({"error": err.message}, err.status)
+            self._send_json({
+                "inventory": self.store.set_inventory(
+                    quantities, actor="admin", role=self.auth_role or "admin"
+                )
+            })
+            return
+        if path == "/api/admin/settings":
+            self._require_role("admin")
+            updates = validate_settings_payload(self._read_json())
+            settings = self.store.update_settings(
+                updates, actor="admin", role=self.auth_role or "admin"
+            )
+            self._send_json({"settings": settings})
+            return
+        raise ApiError("Unknown endpoint.", HTTPStatus.NOT_FOUND)
+
+
+# ---------------------------------------------------------------------------
+# server factory / CLI
+# ---------------------------------------------------------------------------
 
 
 def normalize_samesite(value: str) -> str:
-    """Validates the SameSite policy, accepting any capitalisation."""
     cleaned = (value or "").strip().title()
     if cleaned not in COOKIE_SAMESITE_VALUES:
         raise ValueError(
@@ -1044,9 +1068,6 @@ def make_server(
     cookie_partitioned: bool = False,
     allow_bearer_auth: bool = False,
 ) -> ThreadingHTTPServer:
-    # Bind the store onto a per-server subclass instead of mutating DrrasHandler
-    # itself: the class is shared, so assigning to it would leak this server's
-    # database into every other server in the process.
     handler = type(
         "BoundDrrasHandler",
         (DrrasHandler,),
@@ -1063,10 +1084,10 @@ def make_server(
     return httpd
 
 
-def set_password_interactively(store: Store) -> int:
-    print(f"Setting the DRRAS admin password.\nDatabase: {store.path}")
-    if store.has_password():
-        print("A password is already configured; the new one will replace it.")
+def set_password_interactively(store: Store, role: str = "admin") -> int:
+    print(f"Setting the DRRAS {role} password.\nDatabase: {store.path}")
+    if store.has_password(role):
+        print("A password is already configured for this role; the new one will replace it.")
     while True:
         password = getpass.getpass("New password (min %d chars): " % MIN_PASSWORD_LENGTH)
         if len(password) < MIN_PASSWORD_LENGTH:
@@ -1075,17 +1096,28 @@ def set_password_interactively(store: Store) -> int:
         if password != getpass.getpass("Repeat it: "):
             print("Those did not match, try again.\n")
             continue
-        store.set_password(password)
+        store.set_password(password, role)
         break
     print("Password stored (PBKDF2-HMAC-SHA256, salted).")
     return 0
 
 
+def resolve_db_path(cli_value: str | None) -> Path:
+    if cli_value:
+        return Path(cli_value).expanduser().resolve()
+    env_value = os.environ.get("DRRAS_DB_PATH")
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    return DEFAULT_DB_PATH
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="DRRAS web UI + request review API")
-    parser.add_argument("--set-password", action="store_true", help="create or reset the admin password, then exit")
+    parser.add_argument("--set-password", action="store_true", help="create or reset a password, then exit")
+    parser.add_argument("--role", choices=ROLES, default="admin", help="role for --set-password (default admin)")
+    parser.add_argument("--seed-demo", action="store_true", help="insert sample incidents and exit")
     parser.add_argument("--db", default=None, help="SQLite file (default: $DRRAS_DB_PATH or backend/data/drras.sqlite3)")
-    parser.add_argument("--host", default=os.environ.get("DRRAS_HOST", "0.0.0.0"), help="bind address (default 0.0.0.0)")
+    parser.add_argument("--host", default=os.environ.get("DRRAS_HOST", "0.0.0.0"), help="bind address")
     parser.add_argument(
         "--port",
         type=int,
@@ -1097,40 +1129,25 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("DRRAS_COOKIE_SAMESITE", COOKIE_SAMESITE_DEFAULT),
         choices=COOKIE_SAMESITE_VALUES,
         type=normalize_samesite,
-        help=(
-            "session cookie SameSite policy (default Strict). Use None when the "
-            "site is opened inside a cross-site frame or preview; it forces Secure, "
-            "so HTTPS is required. (env: DRRAS_COOKIE_SAMESITE)"
-        ),
+        help="session cookie SameSite policy (env: DRRAS_COOKIE_SAMESITE)",
     )
     parser.add_argument(
         "--allow-bearer-auth",
         action="store_true",
         default=os.environ.get("DRRAS_ALLOW_BEARER_AUTH", "") == "1",
-        help=(
-            "also return a bearer token on sign-in so clients that cannot carry "
-            "cookies (the app embedded in a frame under third-party cookie blocking) "
-            "still authenticate. Weaker against XSS than an HttpOnly cookie: enable "
-            "only when you need it. (env: DRRAS_ALLOW_BEARER_AUTH=1)"
-        ),
+        help="also return a bearer token on sign-in for embedded frames without cookies",
     )
     parser.add_argument(
         "--cookie-partitioned",
         action="store_true",
         default=os.environ.get("DRRAS_COOKIE_PARTITIONED", "") == "1",
-        help=(
-            "add the CHIPS Partitioned attribute (requires --cookie-samesite None); "
-            "needed when the site is embedded in an iframe on another domain and the "
-            "browser blocks third-party cookies. (env: DRRAS_COOKIE_PARTITIONED=1)"
-        ),
+        help="add CHIPS Partitioned (requires --cookie-samesite None)",
     )
     args = parser.parse_args(argv)
 
     if args.cookie_partitioned and args.cookie_samesite != "None":
         parser.error("--cookie-partitioned requires --cookie-samesite None")
 
-    # Platform-as-a-service hosts (Render, Railway, Fly) inject PORT and expect
-    # the app to bind directly to it rather than to a fixed 8000.
     port_env = os.environ.get("PORT")
     if port_env and "--port" not in (argv or sys.argv[1:]):
         try:
@@ -1138,32 +1155,40 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError:
             pass
 
-    store = Store(resolve_db_path(args.db))
+    db_path = resolve_db_path(args.db)
+    upload_env = os.environ.get("DRRAS_UPLOAD_DIR")
+    upload_dir = Path(upload_env).expanduser().resolve() if upload_env else db_path.parent / "uploads"
+    store = Store(db_path, upload_dir=upload_dir)
 
     if args.set_password:
-        return set_password_interactively(store)
-# Auto-initialize password from environment variable if not already set
-    env_password = os.environ.get("DRRAS_ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
-    if env_password:
+        return set_password_interactively(store, args.role)
+
+    if args.seed_demo:
+        result = store.seed_demo()
+        print(result["message"])
+        for request_id in result.get("ids", []):
+            print("  " + request_id)
+        return 0
+
+    for env_name, role in (("DRRAS_ADMIN_PASSWORD", "admin"), ("ADMIN_PASSWORD", "admin"),
+                           ("DRRAS_OPERATOR_PASSWORD", "operator")):
+        env_password = os.environ.get(env_name)
+        if not env_password:
+            continue
         if len(env_password) < MIN_PASSWORD_LENGTH:
             print(
-                f"Warning: ADMIN_PASSWORD is too short (minimum {MIN_PASSWORD_LENGTH} characters); ignoring.",
+                f"Warning: {env_name} is too short (minimum {MIN_PASSWORD_LENGTH} characters); ignoring.",
                 file=sys.stderr,
             )
-        elif not store.has_password():
-            store.set_password(env_password)
-            print("Admin password automatically initialized from environment variable.")
+        elif not store.has_password(role):
+            store.set_password(env_password, role)
+            print(f"{role.title()} password initialised from {env_name}.")
 
     cookie_secure = os.environ.get("DRRAS_COOKIE_SECURE", "") == "1"
     try:
         httpd = make_server(
-            args.host,
-            args.port,
-            store,
-            cookie_secure,
-            args.cookie_samesite,
-            args.cookie_partitioned,
-            args.allow_bearer_auth,
+            args.host, args.port, store, cookie_secure,
+            args.cookie_samesite, args.cookie_partitioned, args.allow_bearer_auth,
         )
     except OSError as err:
         print(f"Could not bind {args.host}:{args.port} - {err}", file=sys.stderr)
@@ -1173,29 +1198,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"DRRAS site : http://localhost:{args.port}/")
     print(f"Admin UI   : http://localhost:{args.port}/admin")
     print(f"Database   : {store.path}")
+    print(f"Uploads    : {store.upload_dir}")
     cookie_flags = [f"SameSite={args.cookie_samesite}"]
     if cookie_secure or args.cookie_samesite == "None":
         cookie_flags.append("Secure")
     if args.cookie_partitioned and args.cookie_samesite == "None":
         cookie_flags.append("Partitioned")
     print("Cookie     : " + "; ".join(cookie_flags))
-    print(
-        "Admin auth : cookie" + (" + bearer token" if args.allow_bearer_auth else "")
-        + ("  (DRRAS_ALLOW_BEARER_AUTH=1)" if args.allow_bearer_auth else "")
-    )
+    print("Road routing: " + routing_status()["routingUrl"])
     if args.cookie_samesite == "None":
-        print(
-            "           SameSite=None needs https (http://localhost excepted). To open"
-            " the admin in a plain new tab instead, Strict is safer."
-        )
-    if args.cookie_samesite != "None" and not store.has_password():
-        # Only meaningful before the first sign-in, which is when this bites.
-        print(
-            "Tip: if this site is opened inside a frame/preview and sign-in appears to"
-            " expire instantly, restart with --cookie-samesite None (needs HTTPS)."
-        )
-    if cookie_secure and args.cookie_samesite == "None":
-        print("Note: SameSite=None is only honoured over https:// - http will drop the cookie.")
+        print("           SameSite=None needs https (http://localhost excepted).")
     if not store.has_password():
         print("No admin password yet -> python3 backend/admin_server.py --set-password")
     print("Ctrl-C to stop.")

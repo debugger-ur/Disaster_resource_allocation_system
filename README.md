@@ -1,219 +1,386 @@
-# Disaster_resource_allocation_system
-Automated disaster relief triage and supply dispatch system in C++
-# Disaster Resource Allocation System
+# DRRAS — Disaster Relief Resource Allocation System
 
-A priority-aware relief resource allocation system that automatically tracks disaster-relief requests and resources, and matches supply to demand based on urgency and proximity — built for **DS in C & OOPs with C++ (DSCPP-III-2026-T100)**.
+A working web application for the full relief-request lifecycle: a citizen reports
+an emergency, the server verifies it (duplicate detection + explainable risk
+scoring), a coordinator reviews it in a command centre, and the nearest suitable
+help centre is chosen using **live road distance and travel time** — not a
+straight line. Every decision, dispatch and configuration change is audited.
 
-## Problem Statement / Objective
+The repository also contains the original C++17 console program used for the
+course project; it is independent of the web service and described at the end.
 
-During disasters such as floods, earthquakes, and fires, relief resources (food, medical supplies, shelter, volunteers) are typically allocated manually by control rooms and NGOs using phone calls, spreadsheets, and radio communication. This process is slow, error-prone, and often leads to mismatched supply and demand — some relief centers stay over-stocked while nearby affected zones remain underserved, even though every minute of delay directly affects survival and well-being.
+---
 
-Existing logistics/inventory-management tools are generic and not disaster-specific: they lack urgency ranking, dynamic zone accessibility, and real-time volunteer availability, leaving allocation decisions dependent on individual coordinator experience rather than a systematic, data-driven process.
+## Quick start
 
-**Goal:** Automatically track disaster-relief requests and resources, and allocate resources based on urgency and proximity, reducing response time and ensuring the most urgent requests are served first.
+Requirements: **Python 3.10+** (standard library only) and a modern browser.
+Node.js is not required at runtime.
 
-## Team
-
-**Team DSCPP-III-2026-T100** — Semester 3
-
-| Role | Name | Student ID | Section | Email |
-|---|---|---|---|---|
-| Team Lead | Shubham Bisht | 2510012245 | F | bishtshubham265@gmail.com |
-| Member | Samiksha Bhandari | 2510010580 | DS1 | bhandarisamiksha22@gmail.com |
-| Member | Sarthak Semwal | 2510010180 | ML4 | sarthaksemwal92@gmail.com |
-| Member | Nikhil Singh Rawat | 2510012376 | DS2 | nikhil.singh0072@gmail.com |
-
-## Technologies / Tools Used
-
-- **Language:** C (core data structures), C++ (OOP layer, STL)
-- **Data structures:** Graphs (relief-center/zone network), priority queues / binary heaps (urgency ranking), linked lists (request queues), hash tables (fast inventory lookup)
-- **OOP design:** `Resource` base class with `Food`, `Medical`, `Shelter` subclasses (inheritance & polymorphism); `Volunteer` and `Request` classes; STL containers (`vector`, `map`, `priority_queue`)
-- **C++ persistence:** CSV files through `FileManager` (the current console implementation does not link SQLite)
-- **Browser demo persistence:** `localStorage` for its sample operational data
-- **Admin request service:** Python 3 standard library + SQLite for shared public submissions and admin decisions
-- **IDE:** VS Code
-- **Version control:** Git / GitHub
-
-## Project Setup / Installation
-
-
-### Prerequisites
-- A C++ compiler supporting C++17 or later (e.g. `g++`, `clang++`)
-- CMake
-- Git
-- Python 3.9+ (only needed to run the web request/admin service; it uses the standard library and SQLite)
-
-### Clone the repository
 ```bash
 git clone https://github.com/debugger-ur/Disaster_resource_allocation_system.git
 cd Disaster_resource_allocation_system
-```
 
-### Build
-The CMake project is in `Disaster Relief System/`:
-```bash
-cmake -S "Disaster Relief System" -B "Disaster Relief System/build"
-cmake --build "Disaster Relief System/build"
-```
-
-### Run
-Run the console application with its working directory set to `Disaster Relief System/` so its relative `data/` paths resolve:
-```bash
-cd "Disaster Relief System"
-./build/drras
-```
-
-## System Architecture
-
-The system is organized into four core-system modules sitting between input sources and end users:
-
-1. **Request Manager** — validates and captures incoming relief requests, assigns priority based on urgency, and adds them to the queue.
-2. **Priority Queue** — a binary heap / tree structure that dynamically re-orders requests by urgency and time.
-3. **Allocation Engine** — performs graph-based matching between requests and resources (shortest path / min cost), checks resource and volunteer availability, and generates the allocation plan.
-4. **Persistence layers** — the C++ console program writes CSV through `FileManager`; the browser demo keeps its operational sample data in per-browser `localStorage`; the web request-review service uses SQLite as the shared store for public submissions and admin decisions.
-
-**Inputs:** relief requests from affected zones, resource availability from centers/warehouses, location & road/zone accessibility data, volunteer availability.
-
-**Outputs:** dispatch plan, allocation report, route plan (optimal paths), inventory status, and a performance report — consumed by relief coordinators, NGOs/agencies, government authorities, field volunteers, and citizens.
-
-## Major Features / Modules
-
-- **Receive and rank requests** — collects distress calls / aid requests and automatically sorts them by urgency and severity.
-- **Match inventory** — identifies the closest relief center or warehouse that has the required items in stock.
-- **Generate dispatch plans** — automatically produces an allocation plan per cycle showing what is being sent, where, to whom, and the suggested route.
-- **Reporting** — allocation summaries/statistics, inventory status, and response-time/fulfillment performance reports.
-
-### Deliverables
-- Source code implementing the prioritization and matching logic
-- Database schema (requests, inventory, warehouses, routes)
-- System architecture documentation (workflow, components, data flow)
-- Test scenarios with results
-- Final presentation slide deck (problem, design, demo, results)
-
-## Current Project Status / Progress
-
-| Phase | Timeline | Task | Status |
-|---|---|---|---|
-| Phase I | 28/08/2026 – 12/09/2026 | Finalize requirements and system design | ✅ Complete |
-| Phase II | 13/09/2026 – 30/09/2026 | Implement core data structures (graph, priority queue, hashing) and OOP class hierarchy (`Resource`, `Volunteer`, `Request`) | 🔄 In Progress |
-| Phase III | 01/10/2026 – 15/10/2026 | Integrate allocation algorithm with database and build basic reporting output | ⏳ Not Started |
-| Phase IV | 16/10/2026 – 31/10/2026 | Test on simulated disaster scenarios and refine allocation accuracy | ⏳ Not Started |
-| Phase V | 01/11/2026 – 08/11/2026 | Final demonstration and documentation | ⏳ Not Started |
-
-*As of the latest update, the project is in **Phase II**, actively implementing the core data structures and OOP class hierarchy.*
-
-## Web Admin Module: Request Review
-
-A password-protected web admin module is available at `/admin`. The public relief-request form now posts to the same server-side API, so submissions from different browsers are visible in one dashboard. New requests start as `pending`; an admin can accept or reject them, and each decision is stored with a timestamp and a **message delivered to the user** (the admin writes one, or a sensible default is recorded). The user reads it back on the public "Track Your Request" form with their Request ID.
-
-The form also accepts **quantities per resource category**, checked against the supplies on hand (`inventory` in SQLite). If the ask is beyond current stock ("off the limits") and the situation is `CRITICAL`, the request is granted at least the supplies present at that moment and the user is told exactly how much — *"this much only can be provided at the moment"* — with the rest left for when supplies are replenished. Non-critical over-limit asks are flagged for admin review instead of being auto-granted. Accepting a request allocates the delivered amounts from current stock (never below zero).
-
-### Run locally
-
-The API and static site use only Python's standard library. From the repository root:
-
-```bash
-# Create (or reset) the one admin password. Use at least 12 characters.
+# 1. Create the admin password (12+ characters, prompted twice).
 python3 backend/admin_server.py --set-password
 
-# Start the web UI and API on port 8000.
+# 2. (Optional) Insert realistic demo data: 19 help centres + 9 sample requests.
+python3 backend/admin_server.py --seed-demo
+
+# 3. Start the site and API on port 8000.
 python3 backend/admin_server.py
 ```
 
-Open `http://localhost:8000/` for the public site and `http://localhost:8000/admin` for admin sign-in. The SQLite file is created at `backend/data/drras.sqlite3` and is intentionally ignored by Git. Set `DRRAS_DB_PATH=/path/to/requests.sqlite3` to select another durable location; use that same value for password setup and when starting the server. Run `python3 -m unittest discover -s backend/tests -v` for backend tests.
+Open:
 
-### Routes and protection
+- **Public site** — <http://localhost:8000/>
+- **Command centre** — <http://localhost:8000/admin> (sign in with the password)
 
-- `POST /api/requests` — validates and saves a public request as pending. Optional `resourceQuantities` (`{"Supply": 50, ...}`) is checked against current stock; the response carries `grantedResources` and, when stock limited the ask, a `userMessage` for the user.
-- `GET /api/requests/{id}` — public status check; returns the request including `userMessage` and `decisionMessage` (the note recorded with the admin's accept/reject).
-- `GET /api/inventory` — public: supplies currently on hand per resource category.
-- `POST /api/admin/login` — verifies the configured password and issues an opaque, server-side session cookie.
-- `GET /api/admin/session` and `GET /api/admin/requests` — require a valid admin session.
-- `PATCH /api/admin/requests/{id}` with `{"status":"accepted"}` or `{"status":"rejected"}` and an optional `{"message":"..."}` — requires the admin session and a CSRF token; a request can only be reviewed once. The message (or a default one) is stored for the user; accepting also allocates the requested quantities from stock (capped at what is on hand) and records the delivered amounts in `grantedResources`.
-- `GET /api/admin/inventory` / `PUT /api/admin/inventory` with `{"quantities":{"Supply":500}}` — view or adjust the stock levels (admin session + CSRF required for the update).
-- `POST /api/admin/logout` — revokes the session.
+The SQLite database is created at `backend/data/drras.sqlite3` (ignored by Git).
+Use `--db /path/to/file.sqlite3` or `DRRAS_DB_PATH` consistently for password
+setup, seeding and serving. Demo data can also be inserted later from
+**Admin → Settings → Demo data**.
 
-Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes, not in the browser or source. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, expire after eight hours, and admin mutations require a CSRF token. Login attempts are rate-limited. This small `http.server` implementation is a starter/demo, not a hardened public production server. Before public deployment, port the handlers to a production-grade application server (or a hardened gateway with strict request limits), use HTTPS and set `DRRAS_COOKIE_SECURE=1`, serve `/` and `/api` on the same origin, and configure backups/monitoring. A static-only host such as GitHub Pages cannot run this Python API by itself; the frontend degrades to demo mode there (see Deployment).
+> If the sign-in screen says no password is configured, run `--set-password`
+> against the same database file the server uses.
 
-### Connecting request storage to the rest of the project
+### Preview/embedded frames
 
-The checked-in project did not have a shared web database: `docs/js/storage.js` stored the browser demo data in that browser's `localStorage`, while the separate C++ console program persists records as CSV using `FileManager`. A server cannot read a visitor's `localStorage`, so the request form was wired to this SQLite-backed API; that SQLite database is now the shared source of truth for web requests and admin review. Existing browser-local records are not automatically imported, and the admin decision does not automatically dispatch resources or write into the C++ CSV files.
+If the app is shown inside a sandboxed iframe (for example an IDE preview),
+cookies may be blocked. Start the server with `--allow-bearer-auth` and the
+browser will fall back to a short-lived bearer token stored in `sessionStorage`:
 
-If you already have a server-side request database, keep the browser route contract above and replace the persistence methods in `backend/admin_server.py` (`Store.create_request`, `Store.list_requests`, and `Store.set_request_status`) with calls to that database/repository. Keep the password/session/CSRF checks in the HTTP layer. If accepted requests must become operational C++ disasters, add an explicit promotion/export adapter after acceptance; do not point both stores at files that are being rewritten independently. Back up the SQLite file and restrict filesystem access to the service account.
+```bash
+python3 backend/admin_server.py --allow-bearer-auth
+```
+
+---
+
+## What is implemented
+
+### Public site (`/`)
+
+- **Overview** — live counts, active incidents, recent dispatches, and a Leaflet
+  map with category-coded markers.
+- **Report an emergency** — disaster type, severity, affected people, resource
+  quantities, description, evidence upload (JPEG/PNG/PDF), location by map pin,
+  place search (Nominatim through the server), or GPS **only after the button is
+  pressed**. Submitting returns a receipt with a request ID.
+- **Nearby help** — centre list beside the map with category, radius,
+  stocked-with-resource and “open only” filters, availability, stock, road
+  distance, ETA, contact, and route drawing. Selecting a disaster shows centres nearest to it.
+- **Track a request** — timeline, status, allocations and coordinator messages.
+  Recent IDs are remembered in `localStorage` on that device only.
+- **How it works** — plain-language explanation of verification and allocation.
+
+### Command centre (`/admin`)
+
+- **Overview** — requests submitted, awaiting verification, approved, rejected,
+  possible duplicates, high-risk, active disasters, available vs committed
+  resources, risk distribution, centre network map, recent audit.
+- **Verification queue** — tabs for all, high-risk, duplicate review, manual
+  review and auto-approval, with search, severity filter and sorting.
+- **All requests** — filter by status, risk, severity, type; search and sort.
+- **Request drawer** — full detail, risk score with the exact points that made
+  it, every duplicate match and its factor breakdown, evidence, reporter
+  contact, status timeline and audit trail.
+- **Actions** — approve, reject (reason required), request more information,
+  flag, merge duplicate, link related report, keep separate, start response,
+  resolve.
+- **Allocation** — nearest-centre recommendations with routed distance/ETA,
+  coverage, availability, load balancing, per-centre stock, multi-centre plan,
+  quantity confirmation, override reason, and dispatch/deliver/cancel tracking.
+- **Centres & stock** — searchable inventory; administrators can add or edit
+  centres and stock.
+- **Audit log** — who, when, what, and why, append-only.
+- **Settings** (administrators) — auto-approval rules, duplicate/risk
+  thresholds, rate limits, central reserve, routing status, demo seed.
+  Operators can review and allocate but cannot change configuration.
+
+---
+
+## How verification works
+
+Every submission is validated server-side, then compared with recent reports.
+Nothing in this pipeline can reject a request — automation may only route work
+to a person.
+
+**Duplicate detection** compares the new report with reports from the last
+72 hours (configurable) using:
+
+| Signal | Why it matters |
+|---|---|
+| Location proximity | Scores fall off with distance; only reports within 50 km are compared |
+| Disaster category | Same category scores higher than a related one |
+| Description similarity | Token overlap of the two descriptions |
+| Submission time | Recent reports score higher inside the window |
+| Contact details | Same normalised phone/email |
+| Requested resources | Overlap in requested resource categories |
+
+If the combined score reaches the configurable threshold (default 60), the
+request becomes **Possible duplicate** and both IDs, locations, distance and
+factor points are shown. A coordinator must **merge**, **link** or **keep
+separate** it; it is never rejected automatically.
+
+**Risk scoring** produces 0–100 plus named reasons and a full checklist:
+
+- thin or missing description, invalid/missing phone or email;
+- repeated submissions from the same contact or a burst from one IP;
+- inconsistent or far-apart locations for the same contact;
+- conflicting details (for example CRITICAL with ≤1 affected person);
+- reused evidence (byte-identical file already uploaded on another request);
+- duplicate signal.
+
+Thresholds map the score to **Low / Medium / High** (defaults 25 / 55) and are
+configurable. The score and each contributing factor are visible in the admin
+drawer, together with checks that passed.
+
+**Routing and queues**
+
+| Outcome | Status | Queue |
+|---|---|---|
+| Possible duplicate | `possible_duplicate` | duplicate review |
+| High risk | `under_verification` | high-risk verification |
+| Medium risk | `awaiting_approval` | manual review |
+| Low risk, rules not met | `awaiting_approval` | manual review |
+| Low risk, all rules met | `approved` | auto-approval |
+
+Auto-approval is **off by default**. When enabled it can only approve: it
+requires low risk below a ceiling that must stay under the medium threshold, an
+allowed severity, a minimum description length, valid contact, and no duplicate
+block. Any failure simply sends the request to a person.
+
+Workflow statuses: `submitted → under_verification / possible_duplicate →
+awaiting_approval → approved → resources_assigned → in_progress → resolved`,
+with `rejected` available only as an explicit human decision.
+
+---
+
+## Allocation, maps and routing
+
+- Recommendations rank centres on **stock coverage, road distance, availability
+  and current load**, weighted by severity. Closed centres are excluded from the
+  proposed plan, and no centre is asked for more than it holds.
+- Multi-centre plans show the split and what remains uncovered.
+- The actual allocation is a database transaction: stock is decremented exactly
+  once, over-allocation is refused, and cancelling returns stock to the centre.
+- Dispatch, delivery and cancellation notify the reporter in-app and appear in
+  the request timeline and audit log.
+- Distances and ETAs come from **OSRM** through a server-side proxy; place search
+  uses **Nominatim**. If either service is unreachable, the API returns
+  `distanceSource: "estimate"`, the UI labels it as an estimate, and **no route
+  line is drawn**. The browser never receives a third-party key.
+- Leaflet 1.9.4 is vendored in `docs/vendor/leaflet/`; map tiles come directly
+  from OpenStreetMap in the browser.
+
+---
+
+## Sample data vs. live functionality
+
+| Area | State |
+|---|---|
+| Reporting, validation, verification, queue, approvals, actions | Working, persisted in SQLite |
+| Auth, roles (admin/operator), CSRF, rate limiting, audit | Working |
+| Allocation, stock deduction, dispatch/delivery lifecycle | Working |
+| 19 help centres around Dehradun | **Sample seed data** (`--seed-demo` / Settings) |
+| 9 demo requests incl. duplicate pair and high-risk record | **Sample seed data**, marked “Demo data” |
+| OSRM road routing and Nominatim search | Working when the deployment has outbound internet |
+| OSM map tiles | Need network in the browser |
+| Offline/no-routing mode | Working, but shows labelled estimates and no route line |
+| Email/SMS notifications | **Not implemented** — notifications are in-app |
+| Production web server / TLS | Deploy behind nginx or Caddy; the stdlib server is not a hardened edge |
+
+Demo data is never mixed silently into live data: seeded requests carry
+`isDemo`, and the admin UI labels them.
+
+---
+
+## Architecture
+
+```
+Browser (vanilla ES modules + vendored Leaflet)
+  docs/index.html, docs/admin.html, docs/js/*.js, docs/css/*.css
+        │  same-origin fetch, cookie or bearer session + CSRF token
+        ▼
+Python standard-library HTTP server  backend/admin_server.py
+  validation, auth, RBAC, routes, static files, upload limits
+        │
+        ├── backend/db_store.py          SQLite schema, workflow, allocation, audit
+        ├── backend/drras_verification.py duplicate + risk engines (pure)
+        ├── backend/drras_allocation.py   scoring and multi-centre plan (pure)
+        ├── backend/drras_geo.py          OSRM / Nominatim proxy with cache + fallback
+        ├── backend/drras_seed.py         sample centres and demo requests
+        └── backend/drras_common.py       constants, defaults, helpers
+```
+
+### Files that changed or were added in this redesign
+
+- `backend/admin_server.py` — rewritten HTTP layer: public and admin routes,
+  validation, RBAC, CSRF, rate limiting, uploads, static serving.
+- `backend/db_store.py` — new storage/domain layer and schema v2 with migration.
+- `backend/drras_common.py`, `drras_verification.py`, `drras_allocation.py`,
+  `drras_geo.py`, `drras_seed.py` — new modules.
+- `backend/tests/test_admin_server.py` — extended API suite;
+  `test_verification.py`, `test_allocation.py`, `test_db_store.py` — new
+  engine/store suites.
+- `docs/index.html`, `docs/admin.html`, `docs/css/style.css`,
+  `docs/css/admin.css` — redesigned public site and command centre.
+- `docs/js/api.js`, `format.js`, `map.js`, `shared.js`, `main.js`, `admin.js` —
+  new front-end modules. The previous localStorage demo modules
+  (`requestService.js`, `seedData.js`, managers, `distanceCalculator.js`, etc.)
+  were removed; nothing references them.
+- `docs/vendor/leaflet/` — vendored Leaflet 1.9.4 (no CDN dependency).
+- `README.md`, `Dockerfile` — updated for the new app.
+
+---
+
+## API
+
+Public:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Service status (also reports whether a password exists) |
+| `GET` | `/api/overview` | Public statistics, active incidents, recent dispatches |
+| `GET` | `/api/help-centres` | Full centre directory |
+| `GET` | `/api/nearby?lat=&lon=&category=&radius=&availability=&limit=` | Nearest centres with distances/ETA |
+| `GET` | `/api/places?q=` | Place search through the server proxy |
+| `GET` | `/api/route?fromLat=&fromLon=&toLat=&toLon=` | Road route (or labelled estimate) |
+| `GET` | `/api/inventory` | Central reserve levels |
+| `POST` | `/api/requests` | Submit a report |
+| `GET` | `/api/requests/{id}` | Track a report (no other reporter's private data) |
+| `POST` | `/api/uploads` | Upload evidence as base64 with type/size checks |
+
+Admin (session required; mutations also require `X-CSRF-Token`):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/admin/login`, `/api/admin/logout` | Sign in / out |
+| `GET` | `/api/admin/session` | Session, CSRF token, role |
+| `GET` | `/api/admin/requests`, `/api/admin/requests/{id}` | List / detail |
+| `POST` | `/api/admin/requests/{id}/action` | approve, reject, request_info, flag, merge, link, keep_separate, start, resolve |
+| `GET` | `/api/admin/requests/{id}/recommendations` | Ranked centres + plan |
+| `POST` | `/api/admin/requests/{id}/allocations` | Commit stock from a centre |
+| `PATCH` | `/api/admin/allocations/{id}` | assigned / dispatched / delivered / cancelled |
+| `GET/PUT` | `/api/admin/settings` | Approval rules and thresholds |
+| `GET/PUT` | `/api/admin/inventory` | Central reserve |
+| `GET/POST` | `/api/admin/help-centres`; `PATCH /{id}` | Centre directory and stock |
+| `GET` | `/api/admin/stats` | Dashboard counters |
+| `GET` | `/api/admin/audit?limit=&requestId=` | Audit entries |
+| `GET` | `/api/admin/notifications`, `/api/admin/allocations` | Operational feeds |
+| `POST` | `/api/admin/seed-demo` | Insert sample data once |
+| `GET` | `/api/admin/evidence/{id}` | Fetch private uploaded evidence |
+
+The legacy `PATCH /api/admin/requests/{id}` with `{"status": "accepted" | "rejected"}`
+is still accepted for existing integrations.
+
+---
+
+## Security and reliability
+
+- Passwords: PBKDF2-HMAC-SHA256 with per-user salt; never in source or browser.
+- Sessions: opaque server-side tokens, `HttpOnly`, `SameSite=Strict` by default,
+  eight-hour expiry, logout revocation, optional bearer mode for framed previews.
+- CSRF token required for every admin mutation; login attempts rate-limited.
+- Role-based access: `admin` can configure; `operator` can review, allocate and
+  dispatch but cannot change settings or centres.
+- Server-side validation for all submission, allocation, centre and settings
+  payloads, including coherent risk thresholds and quantity caps.
+- Uploads: MIME allow-list (JPEG/PNG/PDF), 5 MB cap, generated filenames,
+  private serving route, magic-byte signature check.
+- SQLite foreign keys and transactions prevent stock going negative or the same
+  allocation being counted twice; cancelling restores stock exactly once.
+- Submission rate limiting per IP (loopback exempt for local development).
+- All errors return JSON and the UI shows loading, empty and failure states.
+- Private reporter contact details are only available to authenticated admins.
+
+For public deployment, terminate TLS at a reverse proxy, set
+`DRRAS_COOKIE_SECURE=1`, back up the SQLite file, and keep the service account’s
+filesystem access narrow.
+
+---
+
+## Configuration
+
+| Variable / flag | Default | Meaning |
+|---|---|---|
+| `DRRAS_DB_PATH` / `--db` | `backend/data/drras.sqlite3` | SQLite location |
+| `DRRAS_UPLOAD_DIR` | `<db dir>/uploads` | Evidence storage |
+| `DRRAS_HOST` / `--host` | `0.0.0.0` | Bind address |
+| `DRRAS_PORT` / `--port` / `PORT` | `8000` | Port |
+| `DRRAS_ROUTING_URL` | `https://router.project-osrm.org` | OSRM base URL |
+| `DRRAS_GEOCODING_URL` | `https://nominatim.openstreetmap.org` | Nominatim base URL |
+| `DRRAS_ROUTING_TIMEOUT` | `4` | Seconds before falling back to an estimate |
+| `DRRAS_OFFLINE=1` | off | Skip all outbound routing/geocoding calls |
+| `DRRAS_COOKIE_SECURE=1` | off | Send cookies over HTTPS only |
+| `DRRAS_COOKIE_SAMESITE` / `--cookie-samesite` | `Strict` | Cookie policy |
+| `DRRAS_ALLOW_BEARER_AUTH=1` / `--allow-bearer-auth` | off | Return a bearer token on login |
+| `DRRAS_ADMIN_PASSWORD`, `DRRAS_OPERATOR_PASSWORD` | — | Bootstrap passwords if none stored (12+ chars) |
+
+Settings stored in the database (admin UI): auto-approval on/off and ceiling,
+allowed severities, minimum description length, contact requirement, duplicate
+block, duplicate window/threshold, medium/high risk thresholds, submission rate
+limit and window.
+
+---
+
+## Tests
+
+```bash
+python3 -m unittest discover -s backend/tests -v
+```
+
+149 tests cover the HTTP API (auth, CSRF, RBAC, validation, rate limits,
+uploads), verification engines, allocation scoring, SQLite workflow, stock
+transactions, merge/link, audit and demo seeding. Set `DRRAS_OFFLINE=1` for
+deterministic tests without outbound routing calls.
+
+---
 
 ## Deployment
 
-The project deploys as **two independent pieces**. Decide which one you need: the console program is compiled and run by its users, and only the web module is "deployed" in the server sense.
+The app serves `docs/` and `/api` from one origin, so it needs a Python process
+and a writable persistent disk — a static-only host cannot run it.
 
-### 1. Web app (site + request API) — needs a server, not a static host
-
-`backend/admin_server.py` serves `docs/` **and** `/api` from one origin, so the browser's relative `fetch("/api/...")` calls resolve. It needs three things a static host cannot give it: a Python process, a writable disk for SQLite, and a persistent filesystem.
-
-```bash
-python3 backend/admin_server.py --set-password   # prompts twice, min 12 chars
-python3 backend/admin_server.py                  # http://0.0.0.0:8000  (+ /admin)
-```
-
-Useful flags/env vars: `--port`, `--host`, `--db`, `--cookie-samesite`, `--cookie-partitioned`, `--allow-bearer-auth`, or `DRRAS_DB_PATH` / `DRRAS_PORT` / `PORT` / `DRRAS_COOKIE_SECURE=1` / `DRRAS_COOKIE_SAMESITE` / `DRRAS_COOKIE_PARTITIONED=1` / `DRRAS_ALLOW_BEARER_AUTH=1`. The `--set-password` step must point at the same database file you then serve, or the new server starts with no credentials and the login screen reports `No admin password is configured`.
-
-**Docker (simplest reproducible deploy).** The image carries no third-party dependencies:
+**Docker**
 
 ```bash
 docker build -t drras .
 docker volume create drras-data
 docker run -d --name drras -p 8000:8000 -v drras-data:/data drras
-docker exec -it drras python3 backend/admin_server.py --set-password   # once
+docker exec -it drras python3 backend/admin_server.py --set-password
 ```
 
-The `-v drras-data:/data` is what keeps requests and the password alive across restarts; the container defaults `DRRAS_DB_PATH` to `/data/drras.sqlite3`. Omit the volume and a rebuild wipes the database.
+The image sets `DRRAS_DB_PATH=/data/drras.sqlite3`; the named volume keeps the
+database and password across restarts. Without it, every rebuild starts empty.
 
-**PaaS (Render / Railway / Fly.io).** Build `python3 backend/admin_server.py`, start command `python3 backend/admin_server.py`, health check path `/api/health`. The platform injects `PORT` and the app binds to it. These hosts have **ephemeral** filesystems: you must attach a persistent disk mounted at `/data` (and set `DRRAS_DB_PATH=/data/drras.sqlite3`), or every deploy/restart discards submitted requests.
+**PaaS (Render/Railway/Fly.io)** — build and start
+`python3 backend/admin_server.py`, health check `/api/health`, and attach a
+persistent disk at `/data` with `DRRAS_DB_PATH=/data/drras.sqlite3`. Set
+`DRRAS_COOKIE_SECURE=1` when served over HTTPS.
 
-**VM/VPS with systemd.** Put the SQLite file on the service account's own path and front it with nginx/Caddy for HTTPS:
+**VM with systemd** — run behind nginx/Caddy for TLS, set
+`DRRAS_DB_PATH=/var/lib/drras/drras.sqlite3`, and keep the unit’s user as the
+only owner of that directory.
 
-```ini
-# /etc/systemd/system/drras.service
-[Service]
-Environment=DRRAS_DB_PATH=/var/lib/drras/drras.sqlite3
-Environment=DRRAS_COOKIE_SECURE=1
-Environment=DRRAS_PORT=8000
-ExecStart=/usr/bin/python3 /srv/drras/backend/admin_server.py
-Restart=always
-[Install]
-WantedBy=multi-user.target
-```
+---
 
-`DRRAS_COOKIE_SECURE=1` must only be set when TLS terminates in front of the app, otherwise the browser drops the session cookie and you can never sign in. Run `mkdir -p /var/lib/drras` and back that file up; it is the whole web datastore.
+## Known limitations
 
-### 2. Static-only host (GitHub Pages) — dashboard works, submissions do not
+- Email/SMS delivery is not implemented; notifications appear in the tracker and
+  command centre.
+- This is a standard-library HTTP server intended for a course/demo deployment.
+  Use a reverse proxy and process supervision for real traffic.
+- Routing/geocoding depend on public OSRM/Nominatim instances; heavy use should
+  self-host them or use a provider with an appropriate usage policy.
+- The web app and the C++ console program share concepts but not a database; no
+  automatic export from web allocations into the console CSV files.
 
-GitHub Pages, Netlify, and Vercel (static mode) cannot run Python, so on those hosts the site renders and every client-side feature works — dashboard, distance ranking, allocation, Dijkstra routes, CSV export — but the public request form and the admin dashboard cannot reach a real `/api`, so they run in **demo mode** — browser-local storage and a cosmetic passphrase (see below) rather than shared, authenticated state. Pointing Pages at the wrong folder adds a second, more confusing failure: with the source path set to `/` there is no `index.html` at the repository root, and the URL answers **"There isn't a GitHub Pages site here."** even though the build reports `status: built`.
+---
 
-Check which one you have — a successful build with a 404 means the path, not the code:
+## Original C++ console program
 
-```bash
-gh api repos/<owner>/<repo>/pages --jq '.source'   # want {"branch":"main","path":"/docs"}
-gh api repos/<owner>/<repo>/pages/builds?per_page=1 --jq '.[0] | {status, error: .error.message}'
-```
-
-Set it under **Settings → Pages → Build and deployment → Source: Deploy from a branch → `main` / `/docs`**, then open `https://<owner>.github.io/<repo>/`. If you cannot change that setting, the root `index.html` added here redirects into `docs/`, so `/` also serves the app; the repository-root `.nojekyll` exists so Jekyll leaves the folder alone in that configuration.
-
-Both pages use relative asset paths, so they render correctly under the project subpath (`/<repo>/docs/...`) rather than requesting `/css/...` from the domain root and coming back unstyled.
-
-#### Demo mode: the form and admin still work, with honest limits
-
-`docs/js/requestService.js` probes `/api/health` on load. If a service answers, every call goes through it (shared SQLite, real authentication). If nothing answers — the Pages case — it degrades to **demo mode** instead of erroring: submissions are validated with the same rules the server uses and kept in `localStorage`, and the admin dashboard can be opened with the passphrase in `requestService.js` → `config.demoPassphrase` (default `demo-mode`). Both pages show a banner saying so. Keep that value throwaway: this file is public, so putting your real `--set-password` credential here publishes it.
-
-Two things demo mode is not, which the code will not pretend otherwise:
-
-- **Not access control.** The check runs in the visitor's browser, so the passphrase is readable in the page source and anyone can open the demo dashboard. It exists so a demo has a sign-in step, not to keep anyone out. Anyone who must be excluded needs the service in option 1.
-- **Not shared.** `localStorage` belongs to one browser profile, so an admin on Pages sees only requests submitted from that same browser. Cross-visitor intake requires the server, by definition.
-
-To turn the fallback off and fail loudly instead, set `config.allowDemoFallback = false`. To keep the Pages-hosted page but send data to a real service elsewhere, set `config.apiBase` to that origin — `/api/health` is then probed there, and demo mode never engages.
-
-### 3. Console application
-
-Not deployed at all — built per machine, and it must run *from inside* its folder so the relative `data/` CSV paths resolve:
+`Disaster Relief System/` is the C++17 coursework implementation (graphs, priority
+queue, hash tables, CSV persistence). It remains runnable and unchanged:
 
 ```bash
 cmake -S "Disaster Relief System" -B "Disaster Relief System/build"
@@ -221,85 +388,19 @@ cmake --build "Disaster Relief System/build"
 cd "Disaster Relief System" && ./build/drras
 ```
 
-Running it from the repository root instead creates an empty, stray `data/` folder there rather than reading `Disaster Relief System/data/`.
+It is a separate console application and does not serve the website.
 
-### Troubleshooting: "session expired" the instant you sign in
+---
 
-If the admin dashboard signs in and immediately bounces back with a session
-message, the session is **not** expiring — the browser is not returning the
-session cookie, and the API answers `401`, which the page reports as expiry. The
-cookie defaults to `SameSite=Strict`, which is correct for a normal site but is
-**withheld whenever the page is loaded inside a frame on another domain** (an IDE
-preview, an `<iframe>` on the college portal). Check the server log: `POST
-/api/admin/login 200` followed immediately by `GET /api/admin/requests 401` is
-this exact problem, not a password or clock issue.
+## Team
 
-Two fixes, in order of preference:
+**Team DSCPP-III-2026-T100** — Semester 3
 
-1. **Open the site in its own browser tab** (top-level, not embedded). No server
-   change needed, and `Strict` stays in force.
-2. **If it must be embedded**, cookies may be unavailable no matter what you set —
-   recent browsers block third-party cookies in cross-site frames outright, and
-   Safari blocks them regardless of `SameSite`. In that case stop relying on
-   cookies and let the page authenticate with a header instead:
+| Role | Name | Student ID | Section |
+|---|---|---|---|
+| Team Lead | Shubham Bisht | 2510012245 | F |
+| Member | Samiksha Bhandari | 2510010580 | DS1 |
+| Member | Sarthak Semwal | 2510010180 | ML4 |
+| Member | Nikhil Singh Rawat | 2510012376 | DS2 |
 
-```bash
-python3 backend/admin_server.py --allow-bearer-auth
-```
-
-Sign-in then also returns a `sessionToken`, which the admin page keeps in
-`sessionStorage` and sends as `Authorization: Bearer …`. It needs no cookie, so it
-works inside any frame, and mutations over this path skip the CSRF token by design
-(a cross-site page cannot forge that header). The cookie path is unaffected and
-remains the default: without the flag the server never issues a token and
-`Authorization` grants nothing. The trade-off is real — a token readable by page
-script widens the XSS blast radius versus an `HttpOnly` cookie — so this is opt-in,
-per-tab, and cleared on logout and on any `401`.
-
-For a cookie-only deployment, relaxing the policy is enough:
-
-```bash
-python3 backend/admin_server.py --cookie-samesite None            # needs https
-python3 backend/admin_server.py --cookie-samesite None --cookie-partitioned  # + CHIPS
-```
-
-`None` automatically adds `Secure`, and browsers then **drop the cookie on plain
-http** (only `http://localhost` is exempt) — so `None` over `http://192.168.x.x`
-reproduces the same 401 loop. `--cookie-partitioned` is for browsers that block
-third-party cookies outright inside iframes; it is refused unless paired with
-`None`. Use the same flags as env vars (`DRRAS_COOKIE_SAMESITE`,
-`DRRAS_COOKIE_PARTITIONED=1`, `DRRAS_ALLOW_BEARER_AUTH=1`) for containers. Sessions
-otherwise last 8 hours, so a genuine expiry after that is expected behaviour.
-
-If a fix you deployed does not seem to take effect, suspect the cache, not the
-code: the browser may serve `admin.js` straight from disk without asking. The
-server answers HTML with `Cache-Control: no-cache` so entry points always
-revalidate, and `docs/admin.html` references its assets as `?v=N` — bump `N` when
-you change `docs/js/admin.js` or `docs/css/admin.css`, and hard-reload (Ctrl+Shift+R).
-
-### Pre-public checklist
-
-- Change the demo password; 12+ characters, and never commit it or the `.sqlite3` file (`backend/data/` is git-ignored).
-- Serve over HTTPS and set `DRRAS_COOKIE_SECURE=1`.
-- This is a stdlib `http.server`-based demo: single-process, no proxy trust — the `X-Forwarded-For` rate limiter trusts whatever the client sends unless a reverse gateway overwrites it, so put nginx/Caddy in front and rate-limit there too. Do not expose the port directly.
-- Keep `/` and `/api` same-origin (the client uses relative URLs and `credentials: "same-origin"`).
-- Back up the SQLite file; schedule it, don't rely on the host's disk.
-- Accepted requests are recorded only in SQLite — they do not auto-dispatch resources or write into the C++ CSVs.
-
-## Assumptions
-
-- Relief center locations and their resource inventories are known and can be digitized.
-- Requests are submitted with at least an approximate location and urgency level.
-- The underlying transport network between zones can be represented as a graph with static or slowly-changing distances.
-
-## References
-
-1. Alem, D., Clark, A., & Moreno, A. (2016). Stochastic network models for logistics planning in disaster relief. *European Journal of Operational Research, 255*(1), 239–252.
-2. Nagurney, A., & Salarpour, M. (2020). A stochastic disaster relief game theory network model. *SN Operations Research Forum, 1*(10).
-3. Guigues, M., & Dufresne, J.-P. (2022). Multi-stage stochastic programming methods for adaptive disaster relief logistics planning. *Computers & Operations Research, 137*, 105473.
-4. Eberhardt, K., & Mönch, L. (2025). Stochastic network optimization for strategic resource pre-positioning in disaster relief. *European Journal of Operational Research, 276*(3), 1107–1122.
-5. Shehadeh, K. S., & Zografos, K. G. (2022). Stochastic optimization models for location and inventory prepositioning of relief supplies. *Computers & Industrial Engineering, 165*, 107940.
-
-## License
-
-*Add a license (e.g. MIT) here once decided.*
+Built for *DS in C & OOPs with C++ (DSCPP-III-2026-T100)*.
