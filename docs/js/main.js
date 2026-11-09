@@ -1,6 +1,6 @@
 import {
-  $, $$, api, clearSession, debounce, escapeHtml, fmtDate, resourceSummary,
-  setSession, statusBadge, timeAgo, toast,
+  $, $$, api, debounce, escapeHtml, fmtDate, resourceSummary,
+  statusBadge, timeAgo, toast,
 } from "./api.js";
 import { MapView } from "./map.js";
 
@@ -10,7 +10,7 @@ const RESOURCES = [
   ["Shelter", "Shelter kits"], ["Other", "Other supplies"],
 ];
 const state = {
-  user: null, role: null, evidence: [], centres: [],
+  evidence: [], centres: [],
   origin: { latitude: 30.3165, longitude: 78.0322, label: "Dehradun (default map centre)" },
   homeMap: null, reportMap: null, nearbyMap: null, selectedCentre: null,
 };
@@ -23,7 +23,6 @@ function showView(name) {
   $("#siteNav").classList.remove("open");
   if (target === "report") ensureReportMap();
   if (target === "nearby") { ensureNearbyMap(); loadNearby(); }
-  if (target === "my") loadMyRequests();
   if (target === "home" && state.homeMap) state.homeMap.refresh();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -39,102 +38,6 @@ function setupNavigation() {
     $("#navToggle").setAttribute("aria-expanded", String(nav.classList.contains("open")));
   });
   window.addEventListener("hashchange", () => showView(location.hash.slice(1) || "home"));
-}
-
-function setupAuth() {
-  document.addEventListener("click", (event) => {
-    const opener = event.target.closest("[data-open-auth]");
-    if (opener) openAuth(opener.dataset.openAuth);
-  });
-  $$("[data-auth-tab]").forEach((tab) => tab.addEventListener("click", () => switchAuthTab(tab.dataset.authTab)));
-  $("[data-close-dialog]").addEventListener("click", () => $("#authDialog").close());
-  $("#authDialog").addEventListener("click", (event) => {
-    if (event.target === $("#authDialog")) $("#authDialog").close();
-  });
-  $("#loginForm").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const error = $("#loginError");
-    error.hidden = true;
-    clearSession();
-    try {
-      const data = await api("/api/auth/login", {
-        method: "POST",
-        body: { email: $("#loginEmail").value.trim(), password: $("#loginPassword").value },
-      });
-      finishLogin(data);
-    } catch (err) { error.textContent = err.message; error.hidden = false; }
-  });
-  $("#registerForm").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const error = $("#registerError");
-    error.hidden = true;
-    clearSession();
-    try {
-      const data = await api("/api/auth/register", {
-        method: "POST",
-        body: { name: $("#regName").value.trim(), email: $("#regEmail").value.trim(), password: $("#regPassword").value },
-      });
-      finishLogin(data);
-      toast("Account created. You are now signed in.", "success");
-    } catch (err) { error.textContent = err.message; error.hidden = false; }
-  });
-  $("#authArea").addEventListener("click", async (event) => {
-    if (!event.target.closest("[data-logout]")) return;
-    try { await api("/api/auth/logout", { method: "POST" }); } catch { /* session may already be gone */ }
-    clearSession();
-    state.user = null;
-    state.role = null;
-    updateAuthArea();
-    $("#myReportsCard").hidden = true;
-    toast("Signed out.");
-  });
-}
-
-function openAuth(tab) {
-  switchAuthTab(tab || "login");
-  $("#authDialog").showModal();
-}
-
-function switchAuthTab(tab) {
-  $$("[data-auth-tab]").forEach((button) => button.classList.toggle("active", button.dataset.authTab === tab));
-  $("#loginForm").hidden = tab !== "login";
-  $("#registerForm").hidden = tab !== "register";
-}
-
-function finishLogin(data) {
-  setSession(data);
-  state.user = data.user || null;
-  state.role = data.role;
-  $("#authDialog").close();
-  $("#loginForm").reset();
-  $("#registerForm").reset();
-  updateAuthArea();
-  loadMyRequests();
-}
-
-function updateAuthArea() {
-  const area = $("#authArea");
-  if (state.user) {
-    area.innerHTML = `<div class="user-chip"><span>${escapeHtml(state.user.name)}</span><button class="btn btn-ghost btn-sm" type="button" data-logout>Sign out</button></div>`;
-  } else if (state.role === "admin") {
-    area.innerHTML = `<div class="user-chip"><span>Admin session</span><a class="btn btn-outline btn-sm" href="/admin">Dashboard</a><button class="btn btn-ghost btn-sm" type="button" data-logout>Sign out</button></div>`;
-  } else {
-    area.innerHTML = `<button class="btn btn-outline btn-sm" data-open-auth="login" type="button">Sign in</button><button class="btn btn-primary btn-sm" data-open-auth="register" type="button">Register</button>`;
-  }
-  $("#accountStatus").textContent = state.user ? `Signed in as ${state.user.name} (${state.user.email}).` : "Not signed in.";
-  $("#authPrompt").hidden = Boolean(state.user);
-}
-
-async function hydrateSession() {
-  try {
-    const data = await api("/api/auth/session");
-    if (data.authenticated) {
-      setSession(data);
-      state.user = data.user || null;
-      state.role = data.role;
-    }
-  } catch { /* signed out */ }
-  updateAuthArea();
 }
 
 async function loadOverview() {
@@ -359,7 +262,6 @@ async function submitReport(event) {
     renderReceipt(data);
     toast("Report submitted. Keep the request ID.", "success");
     loadOverview();
-    loadMyRequests();
   } catch (error) {
     errorBox.textContent = error.message;
     errorBox.hidden = false;
@@ -501,37 +403,12 @@ function renderTracked(request) {
   </div>`;
 }
 
-async function loadMyRequests() {
-  if (!state.user) {
-    $("#myReportsCard").hidden = true;
-    return;
-  }
-  try {
-    const data = await api("/api/my/requests");
-    const requests = data.requests || [];
-    $("#myReportsCard").hidden = false;
-    $("#myList").innerHTML = requests.length ? requests.map((item) => `
-      <div class="list-item"><div><h3>${escapeHtml(item.typeLabel)} · ${escapeHtml(item.locationName)}</h3>
-        <p>${escapeHtml(item.id)} · ${escapeHtml(fmtDate(item.createdAt))} · ${escapeHtml(item.statusLabel)}</p></div>
-        <button class="btn btn-outline btn-sm" type="button" data-track-id="${escapeHtml(item.id)}">Track</button></div>`).join("")
-      : '<div class="empty">No reports linked to this account yet.</div>';
-    $$("[data-track-id]").forEach((button) => button.addEventListener("click", () => {
-      $("#trackId").value = button.dataset.trackId;
-      trackRequest();
-    }));
-  } catch (error) {
-    toast(`Could not load your reports: ${error.message}`, "error");
-  }
-}
-
 async function init() {
   setupNavigation();
-  setupAuth();
   setupReport();
   setupNearby();
   setupTrack();
   state.homeMap = new MapView("homeMap", { center: [30.3165, 78.0322], zoom: 10 });
-  await hydrateSession();
   await loadOverview();
   showView(location.hash.slice(1) || "home");
 }

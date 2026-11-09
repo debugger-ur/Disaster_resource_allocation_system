@@ -9,11 +9,10 @@ JavaScript and Leaflet — no framework, no build step and no npm runtime.
 ## What it does
 
 **Citizen side**
-- Register or sign in; anonymous reports are also accepted.
-- Report a disaster with type, severity, location, description, resource quantities and an optional photo/PDF.
+- Report a disaster anonymously — no account or password is needed.
+- Choose the type, severity, location, description, resource quantities and an optional photo/PDF.
 - Pick a location by map click, place search or GPS.
-- Track a request by ID and see the decision/dispatch timeline.
-- See all reports linked to the signed-in account.
+- Track any request by ID and see the decision/dispatch timeline.
 
 **Admin side**
 - View every request, with filters for status, review queue and risk.
@@ -52,7 +51,7 @@ person.
 Browser (HTML, CSS, vanilla ES modules, vendored Leaflet)
    │ same-origin JSON, session cookie or preview bearer token, CSRF header
    ▼
-backend/app.py        HTTP server, routes, auth, uploads, static files
+backend/app.py        HTTP server, routes, admin auth, uploads, static files
 backend/db.py         SQLite schema, workflow, stock transactions, audit
 backend/rules.py      duplicate detection, risk scoring and auto-approval rules
 backend/allocation.py nearest-centre scoring
@@ -62,8 +61,8 @@ backend/config.py     constants, validation and settings defaults
 docs/                 public page, admin page, CSS, JavaScript and Leaflet
 ```
 
-There are **22 focused tests** covering authentication, CSRF, validation,
-duplicate warnings, auto-approval, ownership, uploads, allocation, stock return,
+There are **21 focused tests** covering admin authentication, CSRF, validation,
+duplicate warnings, auto-approval, uploads, allocation, stock return,
 centre management and nearby filtering.
 
 ```bash
@@ -72,9 +71,9 @@ DRRAS_OFFLINE=1 python3 -m unittest discover -s backend/tests -v
 
 `DRRAS_OFFLINE=1` makes tests deterministic and avoids outbound routing requests.
 
-**Project size:** 4,004 lines of application code (comments, blank lines and the
+**Project size:** 3,760 lines of application code (comments, blank lines and the
 vendored Leaflet library excluded). The backend, frontend and tests together are
-5,279 physical lines — below the 6,000-line target for this rewrite.
+4,982 physical lines — below the 6,000-line target for this rewrite.
 
 ## Run locally
 

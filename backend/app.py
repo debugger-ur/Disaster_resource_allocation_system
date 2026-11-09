@@ -33,7 +33,6 @@ from config import (
     STATUSES,
     SEVERITIES,
     ApiError,
-    validate_account,
     validate_centre,
     validate_settings,
     validate_stock,
@@ -207,8 +206,6 @@ class DrrasHandler(BaseHTTPRequestHandler):
             "role": session["role"],
             "csrfToken": session["csrf"],
         }
-        if session["role"] == "citizen":
-            payload["user"] = self.store.get_user(session["user_id"])
         if self.allow_bearer:
             payload["sessionToken"] = session["token"]
         return payload
@@ -288,17 +285,6 @@ class DrrasHandler(BaseHTTPRequestHandler):
             from geo import route_between
             self._send_json(route_between(origin, target))
             return
-        if path == "/api/auth/session":
-            try:
-                session = self._session()
-                self._send_json(self._session_payload(session))
-            except ApiError:
-                self._send_json({"authenticated": False})
-            return
-        if path == "/api/my/requests":
-            session = self._session("citizen")
-            self._send_json({"requests": self.store.list_my_requests(session["user_id"])})
-            return
         if path.startswith("/api/requests/"):
             request_id = urllib.parse.unquote(path.rsplit("/", 1)[-1])
             record = self.store.get_public_request(request_id)
@@ -363,28 +349,6 @@ class DrrasHandler(BaseHTTPRequestHandler):
         raise ApiError("Unknown admin endpoint.", 404)
 
     def _api_post(self, path: str) -> None:
-        if path == "/api/auth/register":
-            if not LIMITER.allow("register:" + self._client_ip(), 6, 900):
-                raise ApiError("Too many attempts. Try again later.", 429)
-            name, email, password = validate_account(self._read_json())
-            user = self.store.register_user(name, email, password)
-            session = self.store.create_session("citizen", user["id"])
-            payload = self._session_payload({**session, "user_id": user["id"]})
-            payload["user"] = user
-            self._send_json(payload, 201, [self._cookie("drras_session", session["token"])])
-            return
-        if path == "/api/auth/login":
-            if not LIMITER.allow("login:" + self._client_ip(), 10, 900):
-                raise ApiError("Too many sign-in attempts. Wait 15 minutes.", 429)
-            body = self._read_json()
-            user = self.store.verify_user(str(body.get("email", "")), str(body.get("password", "")))
-            if not user:
-                raise ApiError("Email or password is incorrect.", 401)
-            session = self.store.create_session("citizen", user["id"])
-            payload = self._session_payload({**session, "user_id": user["id"]})
-            payload["user"] = user
-            self._send_json(payload, 200, [self._cookie("drras_session", session["token"])])
-            return
         if path == "/api/admin/login":
             if not LIMITER.allow("admin_login:" + self._client_ip(), 8, 900):
                 raise ApiError("Too many sign-in attempts. Wait 15 minutes.", 429)
@@ -397,8 +361,8 @@ class DrrasHandler(BaseHTTPRequestHandler):
             self._send_json(self._session_payload(session), 200,
                             [self._cookie("drras_session", session["token"])])
             return
-        if path == "/api/auth/logout":
-            session = self._session()
+        if path == "/api/admin/logout":
+            session = self._session("admin")
             self._csrf(session)
             self.store.delete_session(session["token"])
             self._send_json({"ok": True}, 200, [self._cookie("drras_session", "", 0)])
@@ -407,13 +371,8 @@ class DrrasHandler(BaseHTTPRequestHandler):
             if not LIMITER.allow("submit:" + self._client_ip(), 10, 600):
                 raise ApiError("Too many reports from this connection. Try again later.", 429)
             data = validate_submission(self._read_json())
-            user_id = None
-            try:
-                user_id = self._session("citizen")["user_id"]
-            except ApiError:
-                pass
             evidence = data.pop("evidence")
-            record = self.store.submit_request(data, user_id, evidence)
+            record = self.store.submit_request(data, evidence)
             public = self.store.get_public_request(record["id"])
             self._send_json({
                 "request": public,

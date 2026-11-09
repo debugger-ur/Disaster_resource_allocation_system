@@ -60,17 +60,6 @@ class Client:
         assert status == 200, data
         self.token, self.csrf = data["sessionToken"], data["csrfToken"]
 
-    def register(self, email="asha@example.com", name="Asha"):
-        status, data = self.call(
-            "POST", "/api/auth/register",
-            {"name": name, "email": email, "password": "studentpass"},
-            csrf=False,
-        )
-        assert status == 201, data
-        self.token, self.csrf = data["sessionToken"], data["csrfToken"]
-        return data
-
-
 def report(**overrides):
     data = {
         "disasterType": "FLOOD",
@@ -122,6 +111,9 @@ class ApiTestCase(unittest.TestCase):
         status, html = self.public.call("GET", "/")
         self.assertEqual(status, 200)
         self.assertIn("DRRAS", html if isinstance(html, str) else json.dumps(html))
+        self.assertIn("Track report", html)
+        self.assertNotIn("data-open-auth", html)
+        self.assertNotIn("My reports", html)
 
     def test_admin_login_and_csrf_protection(self):
         wrong = Client(self.base)
@@ -132,25 +124,14 @@ class ApiTestCase(unittest.TestCase):
         status, _ = self.admin.call("POST", "/api/admin/seed-demo", {})
         self.assertEqual(status, 200)
 
-    def test_register_login_and_duplicate_email(self):
-        user = self.public.register()
-        self.assertEqual(user["user"]["email"], "asha@example.com")
-        status, session = self.public.call("GET", "/api/auth/session")
+    def test_public_reporting_needs_no_account(self):
+        request = self.submit()
+        status, data = self.public.call("GET", f"/api/requests/{request['id']}")
         self.assertEqual(status, 200)
-        self.assertTrue(session["authenticated"])
-        status, data = Client(self.base).call(
-            "POST", "/api/auth/register",
-            {"name": "Again", "email": "asha@example.com", "password": "studentpass"},
-            csrf=False,
-        )
-        self.assertEqual(status, 409)
-        client = Client(self.base)
-        status, login = client.call(
-            "POST", "/api/auth/login",
-            {"email": "asha@example.com", "password": "studentpass"}, csrf=False,
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(login["role"], "citizen")
+        self.assertEqual(data["request"]["id"], request["id"])
+        self.assertNotIn("contactPhone", data["request"])
+        status, _ = self.public.call("GET", "/api/auth/session")
+        self.assertEqual(status, 404)
 
     def test_report_validation(self):
         bad = report(resources={})
@@ -308,17 +289,6 @@ class ApiTestCase(unittest.TestCase):
         status, data = self.admin.call("GET", "/api/admin/requests")
         self.assertEqual(len(data["requests"]), 4)
 
-    def test_my_requests_are_private_to_the_signed_in_user(self):
-        self.public.register("one@example.com", "One")
-        request = self.submit()
-        status, mine = self.public.call("GET", "/api/my/requests")
-        self.assertEqual(status, 200)
-        self.assertEqual(len(mine["requests"]), 1)
-        other = Client(self.base)
-        other.register("two@example.com", "Two")
-        status, mine = other.call("GET", "/api/my/requests")
-        self.assertEqual(mine["requests"], [])
-        self.assertNotEqual(request["id"], "")
 
 
 if __name__ == "__main__":

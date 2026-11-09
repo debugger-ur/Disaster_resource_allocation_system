@@ -36,13 +36,6 @@ from rules import assess_risk, auto_approval, find_duplicates
 from seed import CENTRES, demo_requests
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS citizen_users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS admin_login (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     password_hash TEXT NOT NULL,
@@ -52,13 +45,11 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     token_hash TEXT PRIMARY KEY,
     csrf TEXT NOT NULL,
     role TEXT NOT NULL,
-    user_id INTEGER,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS relief_requests (
     id TEXT PRIMARY KEY,
-    user_id INTEGER REFERENCES citizen_users(id),
     type TEXT NOT NULL,
     severity TEXT NOT NULL,
     people INTEGER NOT NULL,
@@ -207,7 +198,6 @@ def _request_dict(row: sqlite3.Row, admin: bool = False) -> dict:
     if admin:
         matches = json_loads(row["duplicate_matches"], [])
         data.update({
-            "userId": row["user_id"],
             "contactName": row["contact_name"],
             "contactPhone": row["contact_phone"],
             "contactEmail": row["contact_email"],
@@ -291,45 +281,19 @@ class Store:
             row = conn.execute("SELECT password_hash FROM admin_login WHERE id = 1").fetchone()
         return bool(row and verify_password(password, row["password_hash"]))
 
-    def register_user(self, name: str, email: str, password: str) -> dict:
-        try:
-            with self._connect() as conn:
-                cursor = conn.execute(
-                    "INSERT INTO citizen_users (name, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
-                    (name, normalise_email(email), hash_password(password), now_iso()),
-                )
-                user_id = cursor.lastrowid
-        except sqlite3.IntegrityError:
-            raise ApiError("An account with that email already exists.", 409) from None
-        return {"id": user_id, "name": name, "email": normalise_email(email)}
-
-    def verify_user(self, email: str, password: str) -> dict | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM citizen_users WHERE email = ?", (normalise_email(email),)
-            ).fetchone()
-        if row and verify_password(password, row["password_hash"]):
-            return {"id": row["id"], "name": row["name"], "email": row["email"]}
-        return None
-
-    def get_user(self, user_id: int) -> dict | None:
-        with self._connect() as conn:
-            row = conn.execute("SELECT id, name, email FROM citizen_users WHERE id = ?", (user_id,)).fetchone()
-        return dict(row) if row else None
-
-    def create_session(self, role: str, user_id: int | None = None) -> dict:
+    def create_session(self, role: str) -> dict:
         token = secrets.token_urlsafe(32)
         csrf = secrets.token_urlsafe(24)
         created = datetime.now(timezone.utc)
         expires = created + timedelta(hours=SESSION_HOURS)
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO auth_sessions (token_hash, csrf, role, user_id, created_at, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (hashlib.sha256(token.encode()).hexdigest(), csrf, role, user_id,
+                "INSERT INTO auth_sessions (token_hash, csrf, role, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (hashlib.sha256(token.encode()).hexdigest(), csrf, role,
                  created.isoformat(), expires.isoformat()),
             )
-        return {"token": token, "csrf": csrf, "role": role, "userId": user_id}
+        return {"token": token, "csrf": csrf, "role": role}
 
     def get_session(self, token: str) -> dict | None:
         if not token:
@@ -375,7 +339,7 @@ class Store:
 
     # ---------- reports ----------
 
-    def submit_request(self, data: dict, user_id: int | None, evidence_ids: list[str]) -> dict:
+    def submit_request(self, data: dict, evidence_ids: list[str]) -> dict:
         settings = self.get_settings()
         created = now_iso()
         duplicate_matches = []
@@ -416,12 +380,12 @@ class Store:
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO relief_requests "
-                "(id, user_id, type, severity, people, description, location_name, latitude, longitude, "
+                "(id, type, severity, people, description, location_name, latitude, longitude, "
                 "contact_name, contact_phone, contact_email, resources, status, review_queue, risk_score, "
                 "risk_level, risk_reasons, duplicate_matches, auto_approved, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    request_id, user_id, data["type"], data["severity"], data["people"],
+                    request_id, data["type"], data["severity"], data["people"],
                     data["description"], data["location_name"], data["latitude"], data["longitude"],
                     data["contact_name"], data["contact_phone"], data["contact_email"],
                     json_dumps(data["resources"]), status, queue, risk["score"], risk["level"],
@@ -484,13 +448,6 @@ class Store:
             ).fetchone()
             data["allocation"] = _allocation_dict(allocation)
         return data
-
-    def list_my_requests(self, user_id: int) -> list[dict]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM relief_requests WHERE user_id = ? ORDER BY created_at DESC", (user_id,)
-            ).fetchall()
-        return [_request_dict(row) for row in rows]
 
     def _history(self, conn, request_id: str, public: bool) -> list[dict]:
         rows = conn.execute(
@@ -923,11 +880,11 @@ class Store:
             created = now_iso()
             for item in demo_requests():
                 conn.execute(
-                    "INSERT INTO relief_requests (id, user_id, type, severity, people, description, "
+                    "INSERT INTO relief_requests (id, type, severity, people, description, "
                     "location_name, latitude, longitude, contact_name, contact_phone, contact_email, "
                     "resources, status, review_queue, risk_score, risk_level, risk_reasons, "
                     "duplicate_matches, auto_approved, is_demo, created_at, updated_at) "
-                    "VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, 1, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, 1, ?, ?)",
                     (
                         item["id"], item["type"], item["severity"], item["people"], item["description"],
                         item["location_name"], item["latitude"], item["longitude"], item["contact_name"],

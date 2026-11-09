@@ -68,7 +68,7 @@ function setupEvents() {
     }
   });
   $("#adminLogout").addEventListener("click", async () => {
-    try { await api("/api/auth/logout", { method: "POST" }); } catch { /* already expired */ }
+    try { await api("/api/admin/logout", { method: "POST" }); } catch { /* already expired */ }
     clearSession();
     showLogin();
   });

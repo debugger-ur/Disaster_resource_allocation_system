@@ -225,22 +225,6 @@ def validate_submission(payload: object) -> dict:
     }
 
 
-def validate_account(payload: object) -> tuple[str, str, str]:
-    if not isinstance(payload, dict):
-        raise ApiError("Expected a JSON object.")
-    name = clean_text(payload.get("name"), 80)
-    email = normalise_email(payload.get("email"))
-    password = str(payload.get("password") or "")
-    if len(name) < 2:
-        raise ApiError("Enter your name.")
-    if not valid_email(email):
-        raise ApiError("Enter a valid email address.")
-    if len(password) < 8:
-        raise ApiError("Password must be at least 8 characters.")
-    if len(password) > 128:
-        raise ApiError("Password is too long.")
-    return name, email, password
-
 
 def validate_stock(value: object) -> dict:
     if not isinstance(value, dict):

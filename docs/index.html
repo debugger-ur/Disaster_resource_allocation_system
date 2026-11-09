@@ -7,7 +7,7 @@
   <meta name="description" content="DRRAS — report a disaster, track relief requests and find the nearest help centre.">
   <title>DRRAS — Disaster Resource Allocation System</title>
   <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="css/style.css?v=4">
+  <link rel="stylesheet" href="css/style.css?v=5">
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
@@ -44,15 +44,11 @@
       <a href="#home" data-nav="home">Home</a>
       <a href="#report" data-nav="report">Report emergency</a>
       <a href="#nearby" data-nav="nearby">Nearby help</a>
-      <a href="#my" data-nav="my">My reports</a>
+      <a href="#track" data-nav="track">Track report</a>
       <a href="#how" data-nav="how">How it works</a>
     </nav>
     <div class="header-actions">
       <a class="btn btn-ghost btn-sm admin-link" href="/admin">Admin</a>
-      <div id="authArea" class="auth-area">
-        <button class="btn btn-outline btn-sm" data-open-auth="login" type="button">Sign in</button>
-        <button class="btn btn-primary btn-sm" data-open-auth="register" type="button">Register</button>
-      </div>
       <button class="nav-toggle" id="navToggle" type="button" aria-label="Open menu" aria-expanded="false">
         <svg class="icon"><use href="#i-menu"/></svg>
       </button>
@@ -252,28 +248,15 @@
     </div>
   </section>
 
-  <section class="view" id="view-my" data-view="my" hidden>
-    <div class="page-head"><div><p class="eyebrow">Tracking</p><h1>My reports</h1><p>Sign in to see reports submitted with your account, or track any request by ID.</p></div></div>
-    <div class="grid-2">
-      <section class="card">
-        <div class="card-head"><div><h2>Track a request</h2><p>Enter the ID from your submission receipt.</p></div></div>
-        <form id="trackForm" class="card-body inline-form">
-          <input class="input mono" id="trackId" placeholder="REQ-1A2B3C4D" autocomplete="off" required>
-          <button class="btn btn-primary" type="submit">Track</button>
-        </form>
-        <div id="trackResult" class="card-body"></div>
-      </section>
-      <section class="card">
-        <div class="card-head"><div><h2>Account</h2><p id="accountStatus">Not signed in.</p></div></div>
-        <div class="card-body" id="authPrompt">
-          <p class="muted">Create an account to keep all your reports in one place. Anonymous reports can still be tracked by ID.</p>
-          <div class="hero-actions"><button class="btn btn-primary btn-sm" data-open-auth="register">Create account</button><button class="btn btn-outline btn-sm" data-open-auth="login">Sign in</button></div>
-        </div>
-      </section>
-    </div>
-    <section class="card" id="myReportsCard" hidden>
-      <div class="card-head"><div><h2>Your request history</h2><p>Reports linked to your signed-in account.</p></div></div>
-      <div id="myList" class="list"></div>
+  <section class="view" id="view-track" data-view="track" hidden>
+    <div class="page-head"><div><p class="eyebrow">No account needed</p><h1>Track a report</h1><p>Enter the request ID from your submission receipt. You can check the status and decision timeline at any time.</p></div></div>
+    <section class="card track-card">
+      <div class="card-head"><div><h2>Request ID</h2><p>It looks like <span class="mono">REQ-1A2B3C4D</span>.</p></div></div>
+      <form id="trackForm" class="card-body inline-form">
+        <input class="input mono" id="trackId" placeholder="REQ-1A2B3C4D" autocomplete="off" aria-label="Request ID" required>
+        <button class="btn btn-primary" type="submit">Track request</button>
+      </form>
+      <div id="trackResult" class="card-body"></div>
     </section>
   </section>
 
@@ -300,30 +283,9 @@
   </div>
 </footer>
 
-<dialog class="dialog" id="authDialog" aria-labelledby="authTitle">
-  <button class="dialog-close" type="button" data-close-dialog aria-label="Close"><svg class="icon"><use href="#i-x"/></svg></button>
-  <h2 id="authTitle">Welcome to DRRAS</h2>
-  <div class="tabs" role="tablist">
-    <button class="tab active" type="button" data-auth-tab="login">Sign in</button>
-    <button class="tab" type="button" data-auth-tab="register">Register</button>
-  </div>
-  <form id="loginForm" class="stack">
-    <div class="field"><label for="loginEmail">Email</label><input class="input" id="loginEmail" type="email" autocomplete="email" required></div>
-    <div class="field"><label for="loginPassword">Password</label><input class="input" id="loginPassword" type="password" autocomplete="current-password" required></div>
-    <p class="form-error" id="loginError" hidden></p>
-    <button class="btn btn-primary" type="submit">Sign in</button>
-  </form>
-  <form id="registerForm" class="stack" hidden>
-    <div class="field"><label for="regName">Full name</label><input class="input" id="regName" autocomplete="name" required></div>
-    <div class="field"><label for="regEmail">Email</label><input class="input" id="regEmail" type="email" autocomplete="email" required></div>
-    <div class="field"><label for="regPassword">Password</label><input class="input" id="regPassword" type="password" minlength="8" autocomplete="new-password" required><span class="hint">At least 8 characters.</span></div>
-    <p class="form-error" id="registerError" hidden></p>
-    <button class="btn btn-primary" type="submit">Create account</button>
-  </form>
-</dialog>
 
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <script src="vendor/leaflet/leaflet.js"></script>
-<script type="module" src="js/main.js?v=4"></script>
+<script type="module" src="js/main.js?v=5"></script>
 </body>
 </html>
