@@ -1,644 +1,291 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#0b1f33">
-<meta name="description" content="Report a disaster, track your relief request, and find the nearest hospital, relief camp, rescue team or supply centre with road distance and travel time.">
-<title>DRRAS — Disaster Relief Resource Allocation System</title>
-<link rel="stylesheet" href="css/style.css?v=3">
-<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#102a43">
+  <meta name="description" content="DRRAS — report a disaster, track relief requests and find the nearest help centre.">
+  <title>DRRAS — Disaster Resource Allocation System</title>
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="css/style.css?v=5">
 </head>
 <body>
-<a class="skip-link" href="#main">Skip to main content</a>
+<a class="skip-link" href="#main">Skip to content</a>
 
-<svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
-  <defs>
-    <symbol id="i-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
-    <symbol id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></symbol>
-    <symbol id="i-phone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 2 .7 2.8a2 2 0 0 1-.5 2.1L8 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.5c.9.3 1.9.6 2.8.7a2 2 0 0 1 1.8 2.1Z"/></symbol>
-    <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
-    <symbol id="i-crosshair" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="8"/></symbol>
-    <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
-    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m20 6-11 11-5-5"/></symbol>
-    <symbol id="i-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></symbol>
-    <symbol id="i-upload" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5-5 5 5"/><path d="M12 5v12"/></symbol>
-    <symbol id="i-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></symbol>
-    <symbol id="i-nav" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11 22 2l-9 19-2-8-8-2Z"/></symbol>
-    <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
-    <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></symbol>
-    <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8h.01"/></symbol>
-    <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
-    <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></symbol>
-    <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
-    <symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/></symbol>
-    <symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9"/><path d="M16 3.1a4 4 0 0 1 0 7.8"/></symbol>
-    <symbol id="i-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M9 22V12h6v10"/></symbol>
-  </defs>
+<svg class="svg-sprite" aria-hidden="true">
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2.7 20h18.6L12 3Z"/><path d="M12 9v5M12 17.5v.1"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><path d="M5 3h4l2 5-2.5 1.5a15 15 0 0 0 6 6L16 13l5 2v4a2 2 0 0 1-2 2A17 17 0 0 1 3 5a2 2 0 0 1 2-2Z"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 20h16"/></symbol>
 </svg>
 
 <div class="emergency-strip">
-  <div class="emergency-strip__inner">
+  <div class="wrap">
     <span class="dot" aria-hidden="true"></span>
     <strong>Life-threatening emergency?</strong>
-    <span>Call <a href="tel:112">112</a> or <a href="tel:108">108</a> first — this portal coordinates relief, it does not dispatch emergency services.</span>
+    <span>Call <a href="tel:112">112</a> or <a href="tel:108">108</a> first. This portal coordinates relief; it does not dispatch emergency services.</span>
   </div>
 </div>
 
 <header class="site-header">
-  <div class="site-header__inner">
-    <a class="brand" href="#overview" data-nav="overview" aria-label="DRRAS home">
-      <span class="brand__mark" aria-hidden="true">DR</span>
-      <span class="brand__text">DRRAS <small>Disaster Relief Resource Allocation System</small></span>
+  <div class="wrap header-inner">
+    <a class="brand" href="#home" data-nav="home" aria-label="DRRAS home">
+      <span class="brand-mark">DR</span>
+      <span><strong>DRRAS</strong><small>Disaster Resource Allocation</small></span>
     </a>
-    <nav class="site-nav" id="siteNav" aria-label="Main">
-      <a href="#overview" data-nav="overview">Overview</a>
-      <a href="#report" data-nav="report">Report an emergency</a>
+    <nav class="site-nav" id="siteNav" aria-label="Main navigation">
+      <a href="#home" data-nav="home">Home</a>
+      <a href="#report" data-nav="report">Report emergency</a>
       <a href="#nearby" data-nav="nearby">Nearby help</a>
-      <a href="#track" data-nav="track">Track request</a>
+      <a href="#track" data-nav="track">Track report</a>
       <a href="#how" data-nav="how">How it works</a>
     </nav>
     <div class="header-actions">
-      <a class="header-link" href="admin.html">
-        <svg width="15" height="15" aria-hidden="true"><use href="#i-shield"/></svg>
-        <span class="label">Command centre</span>
-      </a>
+      <a class="btn btn-ghost btn-sm admin-link" href="/admin">Admin</a>
+      <button class="nav-toggle" id="navToggle" type="button" aria-label="Open menu" aria-expanded="false">
+        <svg class="icon"><use href="#i-menu"/></svg>
+      </button>
     </div>
-    <button class="nav-toggle" id="navToggle" type="button" aria-expanded="false" aria-controls="siteNav" aria-label="Open menu">
-      <svg width="18" height="18" aria-hidden="true"><use href="#i-menu"/></svg>
-    </button>
   </div>
 </header>
 
-<main class="page" id="main">
-
-  <!-- ================= OVERVIEW ================= -->
-  <section class="view" id="view-overview" data-view="overview">
+<main id="main" class="wrap page">
+  <section class="view" id="view-home" data-view="home">
     <div class="hero">
-      <div>
+      <div class="hero-copy">
         <p class="eyebrow">Dehradun district · relief coordination</p>
-        <h1>Report a need. Verify it. Route relief to the right place.</h1>
-        <p class="hero__lead">
-          DRRAS receives disaster reports, checks every one for duplicates and suspicious details,
-          and helps coordinators send the nearest available resources — with real road distance and
-          travel time, not guesswork.
-        </p>
-        <div class="hero__actions">
-          <a class="btn btn--primary" href="#report" data-nav="report">
-            <svg class="btn__icon" aria-hidden="true"><use href="#i-alert"/></svg>
-            Report an emergency
-          </a>
-          <a class="btn btn--secondary" href="#nearby" data-nav="nearby">
-            <svg class="btn__icon" aria-hidden="true"><use href="#i-pin"/></svg>
-            Find nearby help
-          </a>
+        <h1>Report a need. Verify it. Send the nearest help.</h1>
+        <p class="lead">DRRAS lets citizens report a disaster, helps coordinators spot duplicate or suspicious reports, and recommends the closest help centre with real road distance and travel time.</p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="#report" data-nav="report"><svg class="icon"><use href="#i-alert"/></svg> Report an emergency</a>
+          <a class="btn btn-outline" href="#nearby" data-nav="nearby"><svg class="icon"><use href="#i-pin"/></svg> Find nearby help</a>
         </div>
-        <div class="hero__trust">
-          <span><svg width="15" height="15" aria-hidden="true"><use href="#i-shield"/></svg> No automated rejection — uncertain reports go to a person</span>
-          <span><svg width="15" height="15" aria-hidden="true"><use href="#i-pin"/></svg> Road distance from OSRM routing</span>
+        <div class="trust-row">
+          <span><svg class="icon"><use href="#i-shield"/></svg> Duplicates are never auto-rejected</span>
+          <span><svg class="icon"><use href="#i-pin"/></svg> OSRM road distance, with an honest fallback</span>
         </div>
       </div>
-      <div class="hero__map-wrap">
-        <div class="hero__map" id="overviewMap" role="region" aria-label="Map of active incidents and help centres"></div>
-        <div class="hero__map-caption">
-          <span class="badge badge--danger badge--lg"><span class="badge__dot"></span> Active incidents</span>
-          <span class="muted tiny" id="overviewMapCount">Loading…</span>
-        </div>
+      <div class="hero-panel">
+        <div id="homeMap" class="map map-hero" role="region" aria-label="Map of incidents and help centres"></div>
+        <div class="map-caption"><span class="badge badge-red">Active incidents</span><span class="muted small" id="homeMapNote">Loading map…</span></div>
       </div>
     </div>
 
-    <div class="stack" style="margin-top:28px">
-      <div class="stat-grid">
-        <article class="stat">
-          <span class="stat__label">Active incidents</span>
-          <span class="stat__value" id="statActive">—</span>
-          <span class="stat__meta">Approved and in response</span>
-        </article>
-        <article class="stat">
-          <span class="stat__label">Help centres online</span>
-          <span class="stat__value" id="statCentres">—</span>
-          <span class="stat__meta" id="statCentresMeta">Across the district</span>
-        </article>
-        <article class="stat">
-          <span class="stat__label">People reached</span>
-          <span class="stat__value" id="statPeople">—</span>
-          <span class="stat__meta">On approved and resolved reports</span>
-        </article>
-        <article class="stat">
-          <span class="stat__label">Requests resolved</span>
-          <span class="stat__value" id="statResolved">—</span>
-          <span class="stat__meta" id="statResolvedMeta">Closed after response</span>
-        </article>
-      </div>
+    <div class="stat-grid" aria-label="Live overview">
+      <article class="stat"><span>Active incidents</span><strong id="statActive">—</strong><small>Approved or responding</small></article>
+      <article class="stat"><span>Help centres</span><strong id="statCentres">—</strong><small>Sample directory</small></article>
+      <article class="stat"><span>People reached</span><strong id="statPeople">—</strong><small>On accepted reports</small></article>
+      <article class="stat"><span>Resolved</span><strong id="statResolved">—</strong><small>Completed responses</small></article>
+    </div>
 
-      <div class="grid-2">
-        <section class="card" aria-labelledby="activeIncidentsTitle">
-          <div class="card__head">
-            <div>
-              <h2 class="card__title" id="activeIncidentsTitle">Active incidents</h2>
-              <p class="card__sub">Locations under response or awaiting final closure. Private details are not shown.</p>
-            </div>
-            <a class="btn btn--ghost btn--sm" href="#nearby" data-nav="nearby">Open map
-              <svg class="btn__icon" aria-hidden="true"><use href="#i-arrow"/></svg>
-            </a>
-          </div>
-          <div id="overviewIncidents" class="list-host">
-            <div class="loading-block"><span class="spinner spinner--dark"></span> Loading incidents…</div>
-          </div>
+    <div class="grid-2">
+      <section class="card">
+        <div class="card-head">
+          <div><h2>Active incidents</h2><p>Approved reports currently being handled.</p></div>
+          <a class="link" href="#nearby" data-nav="nearby">Open map <svg class="icon"><use href="#i-arrow"/></svg></a>
+        </div>
+        <div id="incidentsList" class="list"><div class="empty">Loading incidents…</div></div>
+      </section>
+      <div class="stack">
+        <section class="card">
+          <div class="card-head"><div><h2>Recent dispatches</h2><p>Resources committed to verified requests.</p></div></div>
+          <div id="dispatchList" class="list"><div class="empty">Loading dispatches…</div></div>
         </section>
-
-        <div class="stack">
-          <section class="card" aria-labelledby="dispatchTitle">
-            <div class="card__head">
-              <div>
-                <h2 class="card__title" id="dispatchTitle">Recent dispatches</h2>
-                <p class="card__sub">Resources committed to verified requests.</p>
-              </div>
-            </div>
-            <div id="overviewDispatches" class="list-host">
-              <div class="loading-block"><span class="spinner spinner--dark"></span> Loading…</div>
-            </div>
-          </section>
-
-          <section class="card card__pad">
-            <p class="eyebrow">Verification safeguard</p>
-            <h2 class="mt-8" style="font-size:1.05rem">Every report gets a human when it matters.</h2>
-            <p class="muted small mt-8">
-              Duplicate warnings, missing contacts and inconsistent locations raise a risk score — they never
-              reject a request. High-risk and ambiguous reports stay in a verification queue for a coordinator.
-            </p>
-            <a class="btn btn--ghost btn--sm mt-16" href="#how" data-nav="how">Read the workflow
-              <svg class="btn__icon" aria-hidden="true"><use href="#i-arrow"/></svg>
-            </a>
-          </section>
-        </div>
+        <section class="card accent-card">
+          <p class="eyebrow">Safe automation</p>
+          <h3>Automation never rejects a report.</h3>
+          <p class="muted">Rule-based checks can approve only low-risk, complete reports. Anything uncertain goes to a human coordinator.</p>
+          <a class="link" href="#how" data-nav="how">Read the workflow <svg class="icon"><use href="#i-arrow"/></svg></a>
+        </section>
       </div>
     </div>
+    <p class="footnote">Map tiles come from OpenStreetMap. Help-centre records are sample data for this college project; they are labelled as samples in the admin dashboard.</p>
   </section>
 
-  <!-- ================= REPORT ================= -->
   <section class="view" id="view-report" data-view="report" hidden>
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Public reporting</p>
-        <h1>Report an emergency</h1>
-        <p>Give as much detail as you safely can. Your report is checked automatically and then reviewed by the command centre.</p>
-      </div>
-      <span class="badge badge--neutral badge--lg">Takes about 3 minutes</span>
+    <div class="page-head">
+      <div><p class="eyebrow">Citizen reporting</p><h1>Report an emergency</h1><p>Give as much detail as you safely can. You will receive a request ID to track progress.</p></div>
+      <span class="badge badge-neutral">About 3 minutes</span>
     </div>
 
-    <div class="grid-2" style="grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);align-items:start">
+    <div class="report-layout">
       <form id="reportForm" class="stack" novalidate>
         <section class="card">
-          <div class="card__head">
-            <div>
-              <h2 class="card__title">1. What happened?</h2>
-              <p class="card__sub">Describe the incident as clearly as you can.</p>
-            </div>
-          </div>
-          <div class="card__body stack">
-            <div class="form-grid">
-              <div class="field">
-                <label for="rType">Disaster type <span aria-hidden="true" class="text-danger">*</span></label>
-                <select class="select" id="rType" required>
-                  <option value="FLOOD">Flood</option>
-                  <option value="EARTHQUAKE">Earthquake</option>
-                  <option value="FIRE">Fire</option>
-                  <option value="LANDSLIDE">Landslide</option>
-                  <option value="INDUSTRIAL_ACCIDENT">Industrial accident</option>
-                  <option value="OTHER">Other</option>
-                </select>
-              </div>
-              <div class="field">
-                <label for="rAffected">People affected <span aria-hidden="true" class="text-danger">*</span></label>
-                <input class="input" id="rAffected" type="number" min="0" step="1" value="1" inputmode="numeric" required>
-                <span class="field__hint">Best estimate. Use 1 if unknown.</span>
-              </div>
-              <div class="field form-grid--full">
-                <span class="label" id="severityLabel">How urgent is it? <span aria-hidden="true" class="text-danger">*</span></span>
-                <div class="segmented" role="radiogroup" aria-labelledby="severityLabel">
-                  <label><input type="radio" name="rSeverity" value="LOW"><span>Low</span></label>
-                  <label><input type="radio" name="rSeverity" value="MEDIUM"><span>Medium</span></label>
-                  <label><input type="radio" name="rSeverity" value="HIGH"><span>High</span></label>
-                  <label><input type="radio" name="rSeverity" value="CRITICAL" checked><span>Critical</span></label>
-                </div>
-              </div>
-              <div class="field form-grid--full">
-                <label for="rDescription">What is happening? <span aria-hidden="true" class="text-danger">*</span></label>
-                <textarea class="textarea" id="rDescription" maxlength="2000" rows="5" required
-                  placeholder="For example: Flood water entered the lanes near the canal. About 30 families are at the community hall. We need drinking water, food packets and a medical team for children with fever."></textarea>
-                <div class="between">
-                  <span class="field__hint">Specific details help verification and allocation.</span>
-                  <span class="counter" id="rDescriptionCount">0 / 2000</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="card__head">
-            <div>
-              <h2 class="card__title">2. Where is it?</h2>
-              <p class="card__sub">Search, use your GPS location, or click the map to drop a pin.</p>
-            </div>
-          </div>
-          <div class="card__body stack">
+          <div class="card-head"><div><h2>1. What happened?</h2><p>Pick the disaster type and describe the need.</p></div></div>
+          <div class="card-body form-grid">
             <div class="field">
-              <label for="rPlaceSearch">Search for a place</label>
-              <div class="location-input-row">
-                <div class="search-field" style="position:relative">
-                  <svg width="17" height="17" aria-hidden="true"><use href="#i-search"/></svg>
-                  <input class="input" id="rPlaceSearch" type="search" placeholder="Village, landmark or street…" autocomplete="off" aria-describedby="placeHelp">
-                  <div class="suggestions" id="rPlaceSuggestions" hidden></div>
-                </div>
-                <button class="btn btn--secondary" type="button" id="rGeolocate">
-                  <svg class="btn__icon" aria-hidden="true"><use href="#i-crosshair"/></svg>
-                  Use my location
-                </button>
-              </div>
-              <span class="field__hint" id="placeHelp">Location search uses OpenStreetMap Nominatim. Your GPS is only read when you press the button.</span>
+              <label for="rType">Disaster type <span class="req">*</span></label>
+              <select class="input" id="rType" required>
+                <option value="FLOOD">Flood</option>
+                <option value="EARTHQUAKE">Earthquake</option>
+                <option value="FIRE">Fire</option>
+                <option value="LANDSLIDE">Landslide</option>
+                <option value="INDUSTRIAL_ACCIDENT">Industrial accident</option>
+                <option value="OTHER">Other</option>
+              </select>
             </div>
-            <div class="map" id="reportMap" style="height:320px;border-radius:10px;border:1px solid var(--line)" role="region" aria-label="Map for choosing the disaster location"></div>
+            <div class="field">
+              <label for="rAffected">People affected <span class="req">*</span></label>
+              <input class="input" id="rAffected" type="number" min="1" max="100000" value="1" required>
+            </div>
+            <div class="field full">
+              <span class="label">How urgent is it? <span class="req">*</span></span>
+              <div class="segmented" role="radiogroup" aria-label="Severity">
+                <label><input type="radio" name="severity" value="LOW"><span>Low</span></label>
+                <label><input type="radio" name="severity" value="MEDIUM"><span>Medium</span></label>
+                <label><input type="radio" name="severity" value="HIGH"><span>High</span></label>
+                <label><input type="radio" name="severity" value="CRITICAL" checked><span>Critical</span></label>
+              </div>
+            </div>
+            <div class="field full">
+              <label for="rDescription">What is happening? <span class="req">*</span></label>
+              <textarea class="input" id="rDescription" rows="5" maxlength="2000" required placeholder="Example: Flood water entered the lanes near the canal. About 30 families are at the community hall and need drinking water, food and medicines."></textarea>
+              <div class="between"><span class="hint">Specific details help verification.</span><span class="hint" id="descCount">0 / 2000</span></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><div><h2>2. Where is it?</h2><p>Search for a place, use GPS, or click the map.</p></div></div>
+          <div class="card-body stack">
+            <div class="inline-form">
+              <div class="search-wrap">
+                <svg class="icon"><use href="#i-search"/></svg>
+                <input class="input" id="rPlaceSearch" type="search" placeholder="Village, landmark or street" autocomplete="off">
+                <div class="suggestions" id="placeSuggestions" hidden></div>
+              </div>
+              <button class="btn btn-outline" type="button" id="rGeolocate"><svg class="icon"><use href="#i-pin"/></svg> Use my location</button>
+            </div>
+            <div id="reportMap" class="map map-report" role="region" aria-label="Choose the disaster location on a map"></div>
             <div class="form-grid">
-              <div class="field form-grid--full">
-                <label for="rLocation">Location name <span aria-hidden="true" class="text-danger">*</span></label>
-                <input class="input" id="rLocation" type="text" maxlength="200" required placeholder="e.g. Raipur canal area, Dehradun">
-              </div>
-              <div class="field">
-                <label for="rLat">Latitude</label>
-                <input class="input" id="rLat" type="text" inputmode="decimal" readonly value="">
-              </div>
-              <div class="field">
-                <label for="rLon">Longitude</label>
-                <input class="input" id="rLon" type="text" inputmode="decimal" readonly value="">
-              </div>
+              <div class="field full"><label for="rLocation">Location name <span class="req">*</span></label><input class="input" id="rLocation" maxlength="200" placeholder="e.g. Raipur canal area, Dehradun" required></div>
+              <div class="field"><label for="rLat">Latitude</label><input class="input" id="rLat" readonly placeholder="Click map"></div>
+              <div class="field"><label for="rLon">Longitude</label><input class="input" id="rLon" readonly placeholder="Click map"></div>
             </div>
-            <p class="field__hint" id="rLocationStatus">No pin placed yet — search for a place or click the map.</p>
+            <p class="hint" id="rLocationStatus">No pin placed yet. Search, use GPS or click the map.</p>
           </div>
         </section>
 
         <section class="card">
-          <div class="card__head">
-            <div>
-              <h2 class="card__title">3. What do you need?</h2>
-              <p class="card__sub">Tick the resources required and give a quantity where you can.</p>
-            </div>
-          </div>
-          <div class="card__body stack">
-            <div class="resource-list" id="rResourceList">
-              <div class="resource-row">
-                <label class="resource-row__label"><input type="checkbox" data-resource="RescueTeam"> Rescue team</label>
-                <input class="input" type="number" min="0" step="1" data-qty="RescueTeam" placeholder="Qty" aria-label="Rescue teams needed">
-              </div>
-              <div class="resource-row">
-                <label class="resource-row__label"><input type="checkbox" data-resource="MedicalTeam"> Medical team</label>
-                <input class="input" type="number" min="0" step="1" data-qty="MedicalTeam" placeholder="Qty" aria-label="Medical teams needed">
-              </div>
-              <div class="resource-row">
-                <label class="resource-row__label"><input type="checkbox" data-resource="Ambulance"> Ambulance</label>
-                <input class="input" type="number" min="0" step="1" data-qty="Ambulance" placeholder="Qty" aria-label="Ambulances needed">
-              </div>
-              <div class="resource-row">
-                <label class="resource-row__label"><input type="checkbox" data-resource="Equipment"> Equipment</label>
-                <input class="input" type="number" min="0" step="1" data-qty="Equipment" placeholder="Qty" aria-label="Equipment needed">
-              </div>
-              <div class="resource-row">
-                <label class="resource-row__label"><input type="checkbox" data-resource="Supply"> Food &amp; supply kits</label>
-                <input class="input" type="number" min="0" step="1" data-qty="Supply" placeholder="Qty" aria-label="Supply kits needed">
-              </div>
-            </div>
-            <p class="field__hint" id="reserveHint">Leave quantities blank if you only know the category.</p>
+          <div class="card-head"><div><h2>3. What do you need?</h2><p>Tick each resource and enter a quantity.</p></div></div>
+          <div class="card-body">
+            <div id="resourceRows" class="resource-grid"></div>
+            <p class="hint">Quantities are estimates. A coordinator confirms the final allocation.</p>
           </div>
         </section>
 
         <section class="card">
-          <div class="card__head">
-            <div>
-              <h2 class="card__title">4. How can we reach you?</h2>
-              <p class="card__sub">A coordinator may call to verify. Contact details are visible to authorised staff only.</p>
-            </div>
-          </div>
-          <div class="card__body">
-            <div class="form-grid">
-              <div class="field">
-                <label for="rContactName">Your name</label>
-                <input class="input" id="rContactName" type="text" maxlength="120" autocomplete="name" placeholder="Optional">
-              </div>
-              <div class="field">
-                <label for="rContactPhone">Phone number</label>
-                <input class="input" id="rContactPhone" type="tel" maxlength="40" autocomplete="tel" placeholder="+91 …">
-                <span class="field__hint">Strongly improves verification.</span>
-              </div>
-              <div class="field form-grid--full">
-                <label for="rContactEmail">Email</label>
-                <input class="input" id="rContactEmail" type="email" maxlength="160" autocomplete="email" placeholder="Optional">
-              </div>
-            </div>
+          <div class="card-head"><div><h2>4. How can we reach you?</h2><p>Contact details are visible only to authorised staff.</p></div></div>
+          <div class="card-body form-grid">
+            <div class="field"><label for="rContactName">Your name</label><input class="input" id="rContactName" maxlength="120" autocomplete="name" placeholder="Optional"></div>
+            <div class="field"><label for="rContactPhone">Phone number</label><input class="input" id="rContactPhone" type="tel" maxlength="30" autocomplete="tel" placeholder="+91 …"></div>
+            <div class="field full"><label for="rContactEmail">Email</label><input class="input" id="rContactEmail" type="email" maxlength="160" autocomplete="email" placeholder="Optional"></div>
           </div>
         </section>
 
         <section class="card">
-          <div class="card__head">
-            <div>
-              <h2 class="card__title">5. Supporting evidence</h2>
-              <p class="card__sub">A photograph or document helps verify the report. Optional.</p>
-            </div>
-          </div>
-          <div class="card__body">
-            <label class="file-drop" id="rFileDrop">
-              <input id="rFiles" type="file" accept="image/jpeg,image/png,application/pdf" multiple>
-              <svg width="22" height="22" aria-hidden="true"><use href="#i-upload"/></svg>
-              <div><strong>Choose files</strong> or drop them here</div>
-              <div class="tiny">JPEG, PNG or PDF · up to 5 MB each · maximum 3 files</div>
-            </label>
-            <div class="evidence-list" id="rEvidenceList"></div>
-            <p class="field__hint mt-8">Files are scanned for type and reused evidence is flagged to the reviewer. They are not public.</p>
+          <div class="card-head"><div><h2>5. Supporting photo</h2><p>Optional. JPEG, PNG or PDF up to 5 MB, maximum three files.</p></div></div>
+          <div class="card-body">
+            <label class="upload-box" for="rFiles"><svg class="icon"><use href="#i-upload"/></svg><span><strong>Choose files</strong> or drop them here</span></label>
+            <input id="rFiles" type="file" accept="image/jpeg,image/png,application/pdf" multiple hidden>
+            <div id="evidenceList" class="chips"></div>
           </div>
         </section>
 
-        <div class="notice notice--info">
-          <svg width="17" height="17" aria-hidden="true"><use href="#i-shield"/></svg>
-          <span><strong>You will get a request ID.</strong> Keep it to track the status. If this is life-threatening, call 112 now — do not wait for a web response.</span>
-        </div>
-
-        <div id="reportError" class="notice notice--danger" role="alert" hidden></div>
-
-        <div class="form-actions" style="border-top:none;padding-top:0;margin-top:-4px">
-          <p class="field__hint">Submitting does not replace an emergency call. <span id="submitHint"></span></p>
-          <button class="btn btn--primary" type="submit" id="reportSubmit">
-            Submit report
-            <svg class="btn__icon" aria-hidden="true"><use href="#i-arrow"/></svg>
-          </button>
+        <div class="notice notice-info"><svg class="icon"><use href="#i-shield"/></svg><span><strong>You will get a request ID.</strong> Keep it to track the report. If life is in danger, call 112 now.</span></div>
+        <div class="notice notice-error" id="reportError" role="alert" hidden></div>
+        <div class="form-actions">
+          <span class="hint">Submitting does not replace an emergency call.</span>
+          <button class="btn btn-primary" type="submit" id="reportSubmit">Submit report <svg class="icon"><use href="#i-arrow"/></svg></button>
         </div>
       </form>
 
       <aside class="stack">
         <div id="reportResult" hidden></div>
-
-        <section class="card card__pad">
-          <p class="eyebrow">Automated checks</p>
-          <h2 class="mt-8" style="font-size:1.02rem">Transparent verification</h2>
-          <ul class="list list--divide mt-16" style="font-size:0.82rem">
-            <li style="padding:10px 0"><strong>Duplicate detection</strong><div class="muted small">Compares location, category, wording, timing, contact and resource type with recent reports. You are warned, never rejected.</div></li>
-            <li style="padding:10px 0"><strong>Risk scoring</strong><div class="muted small">Checks missing or invalid contact details, repeated submissions, inconsistent locations and reused files.</div></li>
-            <li style="padding:10px 0"><strong>Human review</strong><div class="muted small">Medium and high-risk reports wait for a coordinator. High-risk requests are never silently discarded.</div></li>
-            <li style="padding:10px 0"><strong>Audit trail</strong><div class="muted small">Every approval, rejection, merge and dispatch is recorded with the reviewer and reason.</div></li>
-          </ul>
-        </section>
-
-        <section class="card card__pad">
+        <section class="card">
           <p class="eyebrow">What happens next</p>
-          <ol class="timeline mt-16" style="font-size:0.82rem">
-            <li><div class="timeline__text"><strong>Submitted</strong> — you receive an ID immediately.</div></li>
-            <li><div class="timeline__text"><strong>Verification</strong> — duplicates and risk signals are checked.</div></li>
-            <li><div class="timeline__text"><strong>Approval</strong> — a coordinator (or a rule you can audit) approves.</div></li>
-            <li><div class="timeline__text"><strong>Resources assigned</strong> — nearest suitable centre is selected.</div></li>
-            <li><div class="timeline__text"><strong>In progress → resolved</strong> — delivery is tracked.</div></li>
+          <ol class="steps">
+            <li><span>1</span><div><strong>Automatic checks</strong><p>Required fields, duplicate reports and risk flags.</p></div></li>
+            <li><span>2</span><div><strong>Coordinator review</strong><p>Uncertain reports go to a person, never an automatic reject.</p></div></li>
+            <li><span>3</span><div><strong>Nearest centre</strong><p>Stock, distance and urgency are compared before allocation.</p></div></li>
+            <li><span>4</span><div><strong>Track progress</strong><p>Use your request ID to see status and dispatch updates.</p></div></li>
           </ol>
+        </section>
+        <section class="card">
+          <p class="eyebrow">Honest limitation</p>
+          <p class="muted small">Road distance comes from OSRM. If the routing service cannot be reached, the interface shows an estimate and says so.</p>
         </section>
       </aside>
     </div>
   </section>
 
-  <!-- ================= NEARBY ================= -->
   <section class="view" id="view-nearby" data-view="nearby" hidden>
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Location discovery</p>
-        <h1>Nearby help centres</h1>
-        <p>Select a disaster location to see the nearest hospitals, relief camps, food points, rescue teams and warehouses — with road distance and travel time.</p>
-      </div>
-      <span class="badge badge--neutral badge--lg" id="routingBadge">Checking routing…</span>
+    <div class="page-head">
+      <div><p class="eyebrow">Location-based help</p><h1>Nearby help centres</h1><p id="nearbyOrigin">Showing sample centres around Dehradun.</p></div>
+      <span class="badge badge-neutral" id="nearbyCount">— centres</span>
     </div>
-
-    <section class="card" style="overflow:visible">
-      <div class="card__body stack" style="gap:14px">
-        <div class="form-grid" style="grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) auto;align-items:end">
-          <div class="field">
-            <label for="nSearch">Location</label>
-            <div class="location-input-row">
-              <div class="search-field" style="position:relative">
-                <svg width="17" height="17" aria-hidden="true"><use href="#i-search"/></svg>
-                <input class="input" id="nSearch" type="search" placeholder="Search a place, or pick an active incident" autocomplete="off">
-                <div class="suggestions" id="nSuggestions" hidden></div>
-              </div>
-              <button class="btn btn--secondary" type="button" id="nGeolocate" title="Use my location">
-                <svg class="btn__icon" aria-hidden="true"><use href="#i-crosshair"/></svg>
-                My location
-              </button>
-            </div>
-          </div>
-          <div class="field">
-            <label for="nIncident">Or select an active incident</label>
-            <select class="select" id="nIncident"><option value="">Loading incidents…</option></select>
-          </div>
-          <div class="field">
-            <label for="nRadius">Radius</label>
-            <select class="select" id="nRadius">
-              <option value="5">Within 5 km</option>
-              <option value="10">Within 10 km</option>
-              <option value="25" selected>Within 25 km</option>
-              <option value="50">Within 50 km</option>
-              <option value="100">Within 100 km</option>
-            </select>
-          </div>
-        </div>
-        <div class="chip-row" id="nCategories" role="group" aria-label="Filter by help-centre category">
-          <button class="chip is-active" type="button" data-category="all" aria-pressed="true">All centres</button>
-          <button class="chip" type="button" data-category="hospital" aria-pressed="false">Hospitals</button>
-          <button class="chip" type="button" data-category="relief_camp" aria-pressed="false">Relief camps</button>
-          <button class="chip" type="button" data-category="food_water" aria-pressed="false">Food &amp; water</button>
-          <button class="chip" type="button" data-category="rescue_team" aria-pressed="false">Rescue teams</button>
-          <button class="chip" type="button" data-category="warehouse" aria-pressed="false">Warehouses</button>
-          <button class="chip" type="button" data-category="shelter" aria-pressed="false">Shelters</button>
-          <button class="chip" type="button" data-category="medical_camp" aria-pressed="false">Medical camps</button>
-        </div>
-        <div class="between" style="flex-wrap:wrap;gap:10px">
-          <label class="checkbox" style="font-size:0.8rem"><input type="checkbox" id="nOpenOnly" checked> Show only centres that are open</label>
-          <div class="flex flex-wrap" style="gap:8px;align-items:center">
-            <label class="small muted" for="nResource">Stocked with</label>
-            <select class="select" id="nResource" style="width:auto;padding:6px 30px 6px 10px;font-size:0.8rem;min-height:0">
-              <option value="">Any resource</option>
-              <option value="Ambulance">Ambulance</option>
-              <option value="RescueTeam">Rescue team</option>
-              <option value="MedicalTeam">Medical team</option>
-              <option value="Equipment">Equipment</option>
-              <option value="Supply">Supplies</option>
-            </select>
-            <span class="small muted" id="nOriginLabel">Origin: Dehradun city centre</span>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <div class="grid-2" style="grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);margin-top:18px;align-items:start">
+    <div class="nearby-layout">
       <div class="stack">
-        <section class="card map-card">
-          <div class="map" id="nearbyMap" style="height:480px" role="region" aria-label="Map of nearby help centres"></div>
-          <div class="map-note">
-            <svg width="15" height="15" aria-hidden="true"><use href="#i-nav"/></svg>
-            <span id="nearbyMapNote">Distances are calculated from the selected origin. Pick a marker to see details and a route.</span>
-          </div>
-        </section>
-        <div id="nearbyDetail"></div>
+        <div id="nearbyMap" class="map map-nearby" role="region" aria-label="Map of nearby help centres"></div>
+        <p class="hint" id="routingNote"><svg class="icon"><use href="#i-pin"/></svg> Distance source is shown on every card.</p>
       </div>
-
-      <section class="card" aria-labelledby="nearbyTitle">
-        <div class="card__head">
-          <div>
-            <h2 class="card__title" id="nearbyTitle">Nearest help</h2>
-            <p class="card__sub" id="nearbyCount">Finding centres…</p>
-          </div>
-          <span class="badge badge--neutral" id="nearbySourceBadge">—</span>
-        </div>
-        <div id="nearbyList" class="list-host">
-          <div class="loading-block"><span class="spinner spinner--dark"></span> Loading centres…</div>
-        </div>
-      </section>
+      <aside class="stack">
+        <form class="card filters" id="nearbyFilters">
+          <div class="field"><label for="nCategory">Centre type</label><select class="input" id="nCategory"><option value="">All types</option><option value="hospital">Hospital</option><option value="relief_camp">Relief camp</option><option value="food_water">Food &amp; water</option><option value="rescue_team">Rescue base</option><option value="warehouse">Warehouse</option><option value="shelter">Shelter</option><option value="medical_camp">Medical camp</option><option value="other">Other</option></select></div>
+          <div class="field"><label for="nResource">Has resource</label><select class="input" id="nResource"><option value="">Any resource</option><option>Food</option><option>Water</option><option>Medicine</option><option>RescueTeam</option><option>MedicalTeam</option><option>Shelter</option><option>Other</option></select></div>
+          <div class="field"><label for="nAvailability">Availability</label><select class="input" id="nAvailability"><option value="">Any status</option><option value="available">Available</option><option value="limited">Limited</option><option value="full">At capacity</option><option value="closed">Closed</option></select></div>
+          <div class="field"><label for="nRadius">Radius (km)</label><input class="input" id="nRadius" type="number" min="1" max="200" value="50"></div>
+        </form>
+        <div id="nearbyList" class="stack"><div class="empty">Loading centres…</div></div>
+      </aside>
     </div>
   </section>
 
-  <!-- ================= TRACK ================= -->
   <section class="view" id="view-track" data-view="track" hidden>
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Request status</p>
-        <h1>Track your request</h1>
-        <p>Enter the request ID you received. Keep it private — it is the key to this report.</p>
-      </div>
-    </div>
-
-    <div class="grid-2" style="grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);align-items:start">
-      <div class="stack">
-        <section class="card card__pad">
-          <form id="trackForm" class="stack" style="gap:12px">
-            <div class="field">
-              <label for="trackId">Request ID</label>
-              <input class="input mono" id="trackId" type="text" placeholder="REQ-1A2B3C4D5E" autocomplete="off" required>
-            </div>
-            <button class="btn btn--primary" type="submit">
-              Check status
-              <svg class="btn__icon" aria-hidden="true"><use href="#i-arrow"/></svg>
-            </button>
-            <p class="field__hint">The ID looks like <span class="mono">REQ-</span> followed by 10 characters.</p>
-          </form>
-          <div id="recentIds" class="mt-16" hidden>
-            <p class="tiny muted" style="margin-bottom:6px">Reported from this device</p>
-            <div class="chip-row" id="recentIdsList"></div>
-          </div>
-        </section>
-        <div class="notice">
-          <svg width="16" height="16" aria-hidden="true"><use href="#i-info"/></svg>
-          <span>If you have lost your request ID, contact the control room with your name and the location you reported.</span>
-        </div>
-      </div>
-      <div id="trackResult">
-        <section class="card card__pad">
-          <div class="empty">
-            <svg width="34" height="34" aria-hidden="true"><use href="#i-search"/></svg>
-            <h3>No request loaded</h3>
-            <p>Enter your request ID to see the status timeline, coordinator messages and any resources assigned.</p>
-          </div>
-        </section>
-      </div>
-    </div>
+    <div class="page-head"><div><p class="eyebrow">No account needed</p><h1>Track a report</h1><p>Enter the request ID from your submission receipt. You can check the status and decision timeline at any time.</p></div></div>
+    <section class="card track-card">
+      <div class="card-head"><div><h2>Request ID</h2><p>It looks like <span class="mono">REQ-1A2B3C4D</span>.</p></div></div>
+      <form id="trackForm" class="card-body inline-form">
+        <input class="input mono" id="trackId" placeholder="REQ-1A2B3C4D" autocomplete="off" aria-label="Request ID" required>
+        <button class="btn btn-primary" type="submit">Track request</button>
+      </form>
+      <div id="trackResult" class="card-body"></div>
+    </section>
   </section>
 
-  <!-- ================= HOW ================= -->
   <section class="view" id="view-how" data-view="how" hidden>
-    <div class="panel-heading">
-      <div>
-        <p class="eyebrow">Workflow</p>
-        <h1>How DRRAS handles a report</h1>
-        <p>A verification pipeline designed to catch errors without ever discarding a genuine emergency.</p>
-      </div>
+    <div class="page-head"><div><p class="eyebrow">Simple, explainable workflow</p><h1>How DRRAS works</h1><p>Automation helps with sorting and suggestions. People make the final decisions.</p></div></div>
+    <div class="flow-grid">
+      <article class="card"><span class="flow-num">1</span><h2>Submit</h2><p>A citizen selects the disaster type, places a pin, describes the need and requests resources.</p></article>
+      <article class="card"><span class="flow-num">2</span><h2>Check</h2><p>The server validates fields, compares the report with recent reports and calculates a transparent risk score.</p></article>
+      <article class="card"><span class="flow-num">3</span><h2>Review</h2><p>A coordinator sees duplicate matches and risk reasons. They approve, reject or ask for information.</p></article>
+      <article class="card"><span class="flow-num">4</span><h2>Allocate</h2><p>Nearby centres are ranked by stock, road distance, travel time and availability. Stock is deducted when confirmed.</p></article>
     </div>
-
-    <div class="stack">
-      <div class="grid-3">
-        <section class="card card__pad">
-          <span class="badge badge--neutral">Step 1</span>
-          <h2 class="mt-16" style="font-size:1.02rem">Validate &amp; accept</h2>
-          <p class="muted small mt-8">Server-side validation checks required fields, coordinate ranges, resource categories and file types. A request ID is issued immediately.</p>
-        </section>
-        <section class="card card__pad">
-          <span class="badge badge--neutral">Step 2</span>
-          <h2 class="mt-16" style="font-size:1.02rem">Detect duplicates</h2>
-          <p class="muted small mt-8">The report is compared with recent reports on location proximity, disaster category, description similarity, timing, contact details and resource overlap. Matching IDs and locations are shown to a coordinator.</p>
-        </section>
-        <section class="card card__pad">
-          <span class="badge badge--neutral">Step 3</span>
-          <h2 class="mt-16" style="font-size:1.02rem">Score risk</h2>
-          <p class="muted small mt-8">Each signal adds transparent points: missing description, invalid phone, repeated submissions, location mismatch, reused evidence. Low/medium/high thresholds are configurable.</p>
-        </section>
-      </div>
-
-      <div class="grid-2">
-        <section class="card">
-          <div class="card__head">
-            <div>
-              <h2 class="card__title">Request statuses</h2>
-              <p class="card__sub">Exactly where a report can be at any time.</p>
-            </div>
-          </div>
-          <div class="card__body">
-            <ul class="list list--divide" style="font-size:0.84rem">
-              <li style="padding:9px 0"><span class="badge status" data-status="submitted">Submitted</span> Received and queued.</li>
-              <li style="padding:9px 0"><span class="badge status" data-status="under_verification">Under verification</span> A person is checking the details.</li>
-              <li style="padding:9px 0"><span class="badge status" data-status="possible_duplicate">Possible duplicate</span> Another report may describe the same incident.</li>
-              <li style="padding:9px 0"><span class="badge status" data-status="awaiting_approval">Awaiting approval</span> In the coordinator's approval queue.</li>
-              <li style="padding:9px 0"><span class="badge status" data-status="approved">Approved</span> Eligible for resource allocation.</li>
-              <li style="padding:9px 0"><span class="badge status" data-status="rejected">Rejected</span> Closed by a person, with a recorded reason.</li>
-              <li style="padding:9px 0"><span class="badge status" data-status="resources_assigned">Resources assigned</span> Stock committed from a centre.</li>
-              <li style="padding:9px 0"><span class="badge status" data-status="in_progress">In progress</span> Dispatch under way.</li>
-              <li style="padding:9px 0"><span class="badge status" data-status="resolved">Resolved</span> Response complete.</li>
-            </ul>
-          </div>
-        </section>
-
-        <div class="stack">
-          <section class="card card__pad">
-            <p class="eyebrow">Protections</p>
-            <h2 class="mt-8" style="font-size:1.02rem">What the system will not do</h2>
-            <ul class="list mt-16" style="font-size:0.84rem;display:flex;flex-direction:column;gap:9px">
-              <li class="flex" style="align-items:flex-start;gap:8px"><svg width="16" height="16" style="flex-shrink:0;margin-top:3px;color:var(--ok)" aria-hidden="true"><use href="#i-check"/></svg> Reject a report automatically because a risk score is high.</li>
-              <li class="flex" style="align-items:flex-start;gap:8px"><svg width="16" height="16" style="flex-shrink:0;margin-top:3px;color:var(--ok)" aria-hidden="true"><use href="#i-check"/></svg> Discard a high-risk or uncertain case silently.</li>
-              <li class="flex" style="align-items:flex-start;gap:8px"><svg width="16" height="16" style="flex-shrink:0;margin-top:3px;color:var(--ok)" aria-hidden="true"><use href="#i-check"/></svg> Approve anything automatically unless an administrator has enabled explicit rules.</li>
-              <li class="flex" style="align-items:flex-start;gap:8px"><svg width="16" height="16" style="flex-shrink:0;margin-top:3px;color:var(--ok)" aria-hidden="true"><use href="#i-check"/></svg> Show contact details or evidence publicly.</li>
-            </ul>
-          </section>
-          <section class="card card__pad">
-            <p class="eyebrow">Map data</p>
-            <h2 class="mt-8" style="font-size:1.02rem">Distances are honest</h2>
-            <p class="muted small mt-8">Road distance and travel time come from the OSRM routing engine through the server. Where routing is unavailable, the interface labels the figure as an estimate and does not draw a route line.</p>
-            <p class="muted small mt-8">Help-centre records in this deployment are realistic sample data. Verify them before operational use.</p>
-          </section>
-        </div>
-      </div>
+    <div class="grid-2">
+      <section class="card"><h2>Duplicate detection</h2><p class="muted">The system compares disaster category, location within 50 km, description similarity and submission time inside a configurable window. The admin sees the matching ID and the exact points contributed by each factor.</p><div class="notice notice-warning"><strong>Never automatic:</strong> a duplicate warning only asks a human to compare the reports.</div></section>
+      <section class="card"><h2>Automatic approval</h2><p class="muted">Administrators can turn on safe auto-approval. It requires low risk, complete contact details, a minimum description length, an allowed severity and no duplicate warning. Any failed condition sends the report to manual review.</p><div class="notice notice-info"><strong>Default:</strong> auto-approval is off until an administrator enables it.</div></section>
     </div>
+    <section class="card"><h2>Data honesty</h2><p class="muted">All help centres in this repository are labelled sample data for a college project. Map tiles come from OpenStreetMap. Road distances and ETAs come from OSRM; when it is unavailable, the interface shows a clearly labelled estimate and does not draw a route line. Email and SMS notifications are not implemented.</p></section>
   </section>
-
 </main>
 
 <footer class="site-footer">
-  <div class="site-footer__inner">
-    <div>
-      <strong>DRRAS</strong> — Disaster Relief Resource Allocation System.
-      <div class="tiny" style="margin-top:4px">Sample help-centre data for demonstration · Maps © OpenStreetMap contributors · Routing by OSRM</div>
-    </div>
-    <div class="flex" style="gap:16px;align-items:center">
-      <a href="#how" data-nav="how">How verification works</a>
-      <a href="admin.html">Command centre</a>
-    </div>
+  <div class="wrap footer-inner">
+    <div><strong>DRRAS</strong><p>Disaster Resource Allocation System · BTech PBL project</p></div>
+    <div class="footer-links"><a href="#how" data-nav="how">How it works</a><a href="/admin">Admin dashboard</a><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">Map data © OpenStreetMap</a></div>
   </div>
 </footer>
 
-<noscript>
-  <div style="padding:16px;background:#fffaeb;border-top:1px solid #fedf89">JavaScript is required for the map and the reporting form. For emergencies call 112.</div>
-</noscript>
 
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <script src="vendor/leaflet/leaflet.js"></script>
-<script type="module" src="js/main.js?v=3"></script>
+<script type="module" src="js/main.js?v=5"></script>
 </body>
 </html>

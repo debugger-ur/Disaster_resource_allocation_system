@@ -1,141 +1,105 @@
-/**
- * Single HTTP client for the DRRAS service.
- * Every call is same-origin, credentials included, and errors arrive as one
- * consistent ApiError shape so the UI can render useful messages.
- */
+const TOKEN_KEY = "drras_token";
+const CSRF_KEY = "drras_csrf";
 
-export class ApiError extends Error {
-  constructor(message, status = 0, payload = null) {
-    super(message);
-    this.name = "ApiError";
-    this.status = status;
-    this.payload = payload;
-  }
+export const $ = (selector, root = document) => root.querySelector(selector);
+export const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+
+export function setSession(data) {
+  if (data && data.sessionToken) sessionStorage.setItem(TOKEN_KEY, data.sessionToken);
+  if (data && data.csrfToken) sessionStorage.setItem(CSRF_KEY, data.csrfToken);
 }
 
-let csrfToken = null;
-let bearerToken = null;
-let onUnauthorized = null;
-
-export function setCsrf(token) {
-  csrfToken = token || null;
+export function clearSession() {
+  sessionStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(CSRF_KEY);
 }
 
-export function setBearer(token) {
-  bearerToken = token || null;
-}
-
-export function setUnauthorizedHandler(handler) {
-  onUnauthorized = handler;
-}
-
-async function request(method, path, body, options = {}) {
-  const headers = { Accept: "application/json" };
-  const init = {
+export async function api(path, { method = "GET", body, headers = {} } = {}) {
+  const options = {
     method,
     credentials: "same-origin",
-    cache: "no-store",
-    headers,
+    headers: { ...headers },
   };
+  const token = sessionStorage.getItem(TOKEN_KEY);
+  const csrf = sessionStorage.getItem(CSRF_KEY);
+  if (token) options.headers.Authorization = `Bearer ${token}`;
+  if (csrf && method !== "GET") options.headers["X-CSRF-Token"] = csrf;
   if (body !== undefined) {
-    headers["Content-Type"] = "application/json";
-    init.body = JSON.stringify(body);
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
   }
-  if (csrfToken && options.csrf !== false) headers["X-CSRF-Token"] = csrfToken;
-  if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeout ?? 25000);
-  init.signal = controller.signal;
-
-  let response;
-  try {
-    response = await fetch(path, init);
-  } catch (error) {
-    clearTimeout(timeout);
-    if (error?.name === "AbortError") {
-      throw new ApiError("The server took too long to respond. Please try again.", 0);
-    }
-    throw new ApiError(
-      "The DRRAS service could not be reached. Check that the backend is running, then reload.",
-      0,
-    );
-  }
-  clearTimeout(timeout);
-
-  let payload = null;
-  const text = await response.text().catch(() => "");
-  if (text) {
-    try {
-      payload = JSON.parse(text);
-    } catch {
-      payload = null;
-    }
-  }
-
+  const response = await fetch(path, options);
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { error: "Unexpected server response." }; }
   if (!response.ok) {
-    const message =
-      payload?.error ||
-      (response.status === 401
-        ? "Your session has expired. Sign in again."
-        : `The request failed (${response.status}).`);
-    if (response.status === 401 && typeof onUnauthorized === "function" && options.redirect !== false) {
-      onUnauthorized(message);
-    }
-    throw new ApiError(message, response.status, payload);
+    const error = new Error(data.error || `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
   }
-  return payload ?? {};
+  return data;
 }
 
-function query(params = {}) {
-  const search = new URLSearchParams();
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== "") search.set(key, String(value));
-  });
-  const text = search.toString();
-  return text ? `?${text}` : "";
+export async function requireAdminSession() {
+  const data = await api("/api/admin/session");
+  setSession(data);
+  return data;
 }
 
-export const api = {
-  health: () => request("GET", "/api/health"),
-  overview: () => request("GET", "/api/overview"),
-  helpCentres: () => request("GET", "/api/help-centres"),
-  nearby: (params) => request("GET", `/api/nearby${query(params)}`),
-  places: (q) => request("GET", `/api/places${query({ q })}`),
-  route: (fromLat, fromLon, toLat, toLon) =>
-    request("GET", `/api/route${query({ fromLat, fromLon, toLat, toLon })}`),
-  inventory: () => request("GET", "/api/inventory"),
-  submitRequest: (payload) => request("POST", "/api/requests", payload, { timeout: 30000 }),
-  uploadEvidence: (payload) => request("POST", "/api/uploads", payload, { timeout: 45000 }),
-  requestStatus: (id) => request("GET", `/api/requests/${encodeURIComponent(id)}`, undefined, { redirect: false }),
+export function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character]);
+}
 
-  login: (password) =>
-    request("POST", "/api/admin/login", { password }, { csrf: false, redirect: false }),
-  logout: () => request("POST", "/api/admin/logout", {}, { timeout: 10000 }),
-  session: () => request("GET", "/api/admin/session", undefined, { redirect: false }),
+export function fmtDate(value, withTime = false) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("en-IN", withTime
+    ? { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }
+    : { day: "2-digit", month: "short", year: "numeric" });
+}
 
-  adminRequests: () => request("GET", "/api/admin/requests"),
-  adminRequest: (id) => request("GET", `/api/admin/requests/${encodeURIComponent(id)}`),
-  adminStats: () => request("GET", "/api/admin/stats"),
-  adminAudit: (params = {}) => request("GET", `/api/admin/audit${query(params)}`),
-  adminNotifications: () => request("GET", "/api/admin/notifications"),
-  adminAllocations: () => request("GET", "/api/admin/allocations"),
-  adminCentres: () => request("GET", "/api/admin/help-centres"),
-  adminSettings: () => request("GET", "/api/admin/settings"),
-  adminInventory: () => request("GET", "/api/admin/inventory"),
+export function timeAgo(value) {
+  const date = new Date(value);
+  const minutes = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  return `${Math.round(hours / 24)} day(s) ago`;
+}
 
-  action: (id, payload) =>
-    request("POST", `/api/admin/requests/${encodeURIComponent(id)}/action`, payload),
-  recommendations: (id) =>
-    request("GET", `/api/admin/requests/${encodeURIComponent(id)}/recommendations`),
-  allocate: (id, payload) =>
-    request("POST", `/api/admin/requests/${encodeURIComponent(id)}/allocations`, payload),
-  updateAllocation: (id, payload) =>
-    request("PATCH", `/api/admin/allocations/${encodeURIComponent(id)}`, payload),
-  updateSettings: (payload) => request("PUT", "/api/admin/settings", payload),
-  updateInventory: (payload) => request("PUT", "/api/admin/inventory", payload),
-  updateCentre: (id, payload) =>
-    request("PATCH", `/api/admin/help-centres/${encodeURIComponent(id)}`, payload),
-  createCentre: (payload) => request("POST", "/api/admin/help-centres", payload),
-  seedDemo: () => request("POST", "/api/admin/seed-demo", {}),
-};
+export function statusBadge(status, label) {
+  return `<span class="badge status-${escapeHtml(status)}">${escapeHtml(label || status.replace(/_/g, " "))}</span>`;
+}
+
+export function resourceSummary(resources) {
+  const labels = {
+    Food: "Food", Water: "Water", Medicine: "Medicine", RescueTeam: "Rescue team",
+    MedicalTeam: "Medical team", Shelter: "Shelter", Other: "Other",
+  };
+  return Object.entries(resources || {})
+    .map(([name, amount]) => `${escapeHtml(labels[name] || name)} × ${Number(amount)}`)
+    .join(" · ");
+}
+
+export function debounce(callback, wait = 350) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => callback(...args), wait);
+  };
+}
+
+let toastTimer;
+export function toast(message, kind = "info") {
+  const element = $("#toast");
+  if (!element) return;
+  element.textContent = message;
+  element.style.background = kind === "error" ? "#991b1b" : kind === "success" ? "#166534" : "#102a43";
+  element.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { element.hidden = true; }, 3600);
+}

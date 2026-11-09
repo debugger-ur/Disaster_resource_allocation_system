@@ -38,3 +38,6 @@ backend/data/
 *.sqlite3-wal
 __pycache__/
 *.py[cod]
+
+# Local environment
+.env
