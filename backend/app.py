@@ -129,10 +129,13 @@ class DrrasHandler(BaseHTTPRequestHandler):
 
     def _common_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "same-origin")
+        # OSM's tile servers require a valid cross-origin referrer. Sending
+        # "same-origin" stripped it and caused HTTP 403 "Access blocked" tiles.
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data: https://*.tile.openstreetmap.org; "
+            "default-src 'self'; img-src 'self' data: https://tile.openstreetmap.org "
+            "https://*.tile.openstreetmap.org; "
             "style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; "
             "form-action 'self'; base-uri 'self'",
         )

@@ -72,9 +72,9 @@ DRRAS_OFFLINE=1 python3 -m unittest discover -s backend/tests -v
 
 `DRRAS_OFFLINE=1` makes tests deterministic and avoids outbound routing requests.
 
-**Project size:** 3,992 lines of application code (comments, blank lines and the
+**Project size:** 4,004 lines of application code (comments, blank lines and the
 vendored Leaflet library excluded). The backend, frontend and tests together are
-5,261 physical lines — below the 6,000-line target for this rewrite.
+5,279 physical lines — below the 6,000-line target for this rewrite.
 
 ## Run locally
 
@@ -157,7 +157,7 @@ not need permissive CORS.
   before any real use and are labelled “sample” in the admin dashboard.
 - Road distances and ETAs come from public OSRM. If it is unavailable, the UI
   labels the distance as an estimate and does not draw a route line.
-- Map tiles require browser internet access; Leaflet itself is vendored.
+- Map tiles require browser internet access and a valid cross-origin referrer. The server uses `strict-origin-when-cross-origin`; if OSM still blocks tiles, the map shows a fallback notice while centre lists and distances keep working. Leaflet itself is vendored.
 - Email and SMS notifications are not implemented. Status changes are visible in
   the tracking timeline.
 - The Python HTTP server is suitable for a college demonstration, not a hardened

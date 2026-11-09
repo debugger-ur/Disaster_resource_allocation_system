@@ -46,10 +46,24 @@ export class MapView {
     this.map = window.L.map(this.element, { scrollWheelZoom: false }).setView(
       options.center || [30.3165, 78.0322], options.zoom || 11,
     );
-    window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    // Use the single official hostname (not the deprecated a/b/c subdomains)
+    // and keep a cross-origin referrer so OSM's tile policy is satisfied.
+    this.tileLayer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      referrerPolicy: "strict-origin-when-cross-origin",
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     }).addTo(this.map);
+    this.tileErrors = 0;
+    this.tileLayer.on("tileerror", () => {
+      this.tileErrors += 1;
+      if (this.tileErrors < 4 || this.tileWarning) return;
+      this.tileWarning = true;
+      this.map.removeLayer(this.tileLayer);
+      const note = document.createElement("div");
+      note.className = "map-note";
+      note.innerHTML = "<strong>Map tiles could not load.</strong><br>Centre lists, stock and distances still work. Check the browser network or OSM availability.";
+      this.element.appendChild(note);
+    });
     this.centreLayer = window.L.layerGroup().addTo(this.map);
     this.incidentLayer = window.L.layerGroup().addTo(this.map);
     this.ready = true;
