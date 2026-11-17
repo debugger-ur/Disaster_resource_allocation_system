@@ -1,1255 +1,416 @@
-import { api } from "./api.js";
-import { DrrasMap, CATEGORY_META } from "./map.js";
-import { buildTrackSteps } from "./shared.js";
 import {
-  qs,
-  qsa,
-  el,
-  esc,
-  icon,
-  debounce,
-  fmtDateTime,
-  fmtNumber,
-  fmtDistance,
-  fmtDuration,
-  fmtBytes,
-  titleCase,
-  statusBadge,
-  severityBadge,
-  availabilityBadge,
-  resourceLabel,
-  itemsSummary,
-  copyText,
-  readFileAsDataUrl,
-  STATUS_META,
-} from "./format.js";
+  $, $$, api, debounce, escapeHtml, fmtDate, resourceSummary,
+  statusBadge, timeAgo, toast,
+} from "./api.js";
+import { MapView } from "./map.js";
 
-/* ------------------------------------------------------------------ */
-/* State                                                              */
-/* ------------------------------------------------------------------ */
-
-const DEFAULT_ORIGIN = { latitude: 30.3165, longitude: 78.0322, label: "Dehradun city centre" };
-const RECENT_KEY = "drras_recent_request_ids";
-const MAX_FILES = 3;
-
+const RESOURCES = [
+  ["Food", "Food packets"], ["Water", "Drinking water"], ["Medicine", "Medicines"],
+  ["RescueTeam", "Rescue team"], ["MedicalTeam", "Medical team"],
+  ["Shelter", "Shelter kits"], ["Other", "Other supplies"],
+];
 const state = {
-  health: null,
-  overview: null,
-  origin: { ...DEFAULT_ORIGIN },
-  category: "all",
-  radius: 25,
-  resource: "",
-  openOnly: true,
-  centres: [],
-  selectedCentre: null,
-  routesByCentre: new Map(),
-  incidents: [],
-  files: [],
-  reportPin: null,
-  serviceDown: false,
+  evidence: [], centres: [],
+  origin: { latitude: 30.3165, longitude: 78.0322, label: "Dehradun (default map centre)" },
+  homeMap: null, reportMap: null, nearbyMap: null, selectedCentre: null,
 };
 
-const maps = { overview: null, report: null, nearby: null };
-
-/* ------------------------------------------------------------------ */
-/* Bootstrap                                                           */
-/* ------------------------------------------------------------------ */
-
-document.addEventListener("DOMContentLoaded", () => {
-  wireNav();
-  wireHeader();
-  initRouter();
-  checkHealth();
-  initOverview();
-  initReportForm();
-  initNearby();
-  initTrack();
-});
-
-function wireHeader() {
-  const toggle = qs("#navToggle");
-  const nav = qs("#siteNav");
-  if (toggle && nav) {
-    toggle.addEventListener("click", () => {
-      const open = nav.classList.toggle("is-open");
-      toggle.setAttribute("aria-expanded", String(open));
-    });
-  }
-  document.addEventListener("click", (event) => {
-    if (event.target.closest(".suggestions")) return;
-    qsa(".suggestions").forEach((box) => {
-      box.hidden = true;
-    });
-  });
+function showView(name) {
+  const target = document.getElementById(`view-${name}`) ? name : "home";
+  $$(".view").forEach((view) => { view.hidden = view.dataset.view !== target; });
+  $$("[data-nav]").forEach((link) => link.classList.toggle("active", link.dataset.nav === target));
+  if (window.location.hash !== `#${target}`) history.replaceState(null, "", `#${target}`);
+  $("#siteNav").classList.remove("open");
+  if (target === "report") ensureReportMap();
+  if (target === "nearby") { ensureNearbyMap(); loadNearby(); }
+  if (target === "home" && state.homeMap) state.homeMap.refresh();
+  window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
-async function checkHealth() {
-  try {
-    state.health = await api.health();
-  } catch (error) {
-    state.serviceDown = true;
-    state.health = null;
-    const banner = el("div", "notice notice--danger");
-    banner.style.margin = "16px 0 0";
-    banner.innerHTML = `<svg width="18" height="18" aria-hidden="true"><use href="#i-alert"/></svg>
-      <span><strong>The reporting service is not reachable.</strong> ${esc(error.message)}
-      Start it with <span class="mono">python3 backend/admin_server.py</span>. For an emergency, call 112.</span>`;
-    const main = qs("#main");
-    if (main) main.prepend(banner);
-    const submit = qs("#reportSubmit");
-    if (submit) submit.disabled = true;
-  }
-}
-
-function wireNav() {
-  document.addEventListener("click", (event) => {
-    const link = event.target.closest("[data-nav]");
-    if (!link) return;
+function setupNavigation() {
+  $$("[data-nav]").forEach((link) => link.addEventListener("click", (event) => {
     event.preventDefault();
-    const view = link.dataset.nav;
-    if (location.hash !== `#${view}`) {
-      history.pushState(null, "", `#${view}`);
-    }
-    showView(view);
-    const nav = qs("#siteNav");
-    if (nav?.classList.contains("is-open")) {
-      nav.classList.remove("is-open");
-      qs("#navToggle")?.setAttribute("aria-expanded", "false");
-    }
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    showView(link.dataset.nav);
+  }));
+  $("#navToggle").addEventListener("click", () => {
+    const nav = $("#siteNav");
+    nav.classList.toggle("open");
+    $("#navToggle").setAttribute("aria-expanded", String(nav.classList.contains("open")));
   });
-  window.addEventListener("hashchange", () => {
-    const view = parseHash().view;
-    showView(view);
-  });
-}
-
-function parseHash() {
-  const raw = location.hash.replace(/^#/, "");
-  const [view, param] = raw.split("/");
-  const known = ["overview", "report", "nearby", "track", "how"];
-  return { view: known.includes(view) ? view : "overview", param: param || null };
-}
-
-function initRouter() {
-  const { view, param } = parseHash();
-  showView(view);
-  if (view === "track" && param) {
-    const input = qs("#trackId");
-    if (input) input.value = decodeURIComponent(param);
-    loadTrackedRequest(decodeURIComponent(param));
-  }
-}
-
-function showView(view) {
-  qsa(".view").forEach((section) => {
-    section.hidden = section.dataset.view !== view;
-  });
-  qsa("[data-nav]").forEach((link) => {
-    if (link.dataset.nav === view) link.setAttribute("aria-current", "page");
-    else link.removeAttribute("aria-current");
-  });
-  document.title =
-    {
-      overview: "DRRAS — Disaster Relief Resource Allocation System",
-      report: "Report an emergency · DRRAS",
-      nearby: "Nearby help centres · DRRAS",
-      track: "Track your request · DRRAS",
-      how: "How DRRAS works · DRRAS",
-    }[view] || "DRRAS";
-  requestAnimationFrame(() => {
-    Object.values(maps).forEach((map) => map?.invalidate());
-  });
-}
-
-/* ------------------------------------------------------------------ */
-/* Overview                                                           */
-/* ------------------------------------------------------------------ */
-
-async function initOverview() {
-  const map = new DrrasMap(qs("#overviewMap"), { zoom: 11 });
-  maps.overview = map;
-  await loadOverview();
+  window.addEventListener("hashchange", () => showView(location.hash.slice(1) || "home"));
 }
 
 async function loadOverview() {
   try {
-    const data = await api.overview();
-    state.overview = data;
-    state.incidents = data.incidents || [];
-    renderOverview(data);
+    const [overview, centreData] = await Promise.all([api("/api/overview"), api("/api/centres")]);
+    state.centres = centreData.centres || [];
+    $("#statActive").textContent = overview.stats.activeIncidents;
+    $("#statCentres").textContent = overview.stats.centres;
+    $("#statPeople").textContent = Number(overview.stats.peopleReached).toLocaleString("en-IN");
+    $("#statResolved").textContent = overview.stats.resolved;
+    renderIncidents(overview.incidents || []);
+    renderDispatches(overview.dispatches || []);
+    if (state.homeMap) {
+      state.homeMap.setCentres(state.centres);
+      state.homeMap.setIncidents(overview.incidents || [], { onClick: chooseIncident });
+      state.homeMap.fitAll();
+    }
   } catch (error) {
-    const host = qs("#overviewIncidents");
-    if (host) {
-      host.innerHTML = `<div class="empty"><h3>Live data unavailable</h3><p>${esc(error.message)}</p></div>`;
-    }
+    toast(`Could not load overview: ${error.message}`, "error");
   }
 }
 
-function renderOverview(data) {
-  const stats = data.stats || {};
-  setText("#statActive", fmtNumber(stats.activeIncidents ?? 0));
-  setText("#statCentres", fmtNumber(stats.centresOnline ?? 0));
-  setText("#statCentresMeta", `of ${fmtNumber(stats.centresTotal ?? 0)} registered centres`);
-  setText("#statPeople", fmtNumber(stats.peopleReached ?? 0));
-  setText("#statResolved", fmtNumber(stats.requestsResolved ?? 0));
-  setText(
-    "#statResolvedMeta",
-    `${fmtNumber(stats.requestsTotal ?? 0)} request${stats.requestsTotal === 1 ? "" : "s"} received in total`,
-  );
-
-  const incidentHost = qs("#overviewIncidents");
-  if (incidentHost) {
-    if (!data.incidents?.length) {
-      incidentHost.innerHTML = `<div class="empty">
-        <svg width="30" height="30" aria-hidden="true"><use href="#i-shield"/></svg>
-        <h3>No active incidents</h3>
-        <p>Approved reports under response will appear here. You can still report an emergency or browse help centres.</p>
-      </div>`;
-    } else {
-      incidentHost.innerHTML = `<ul class="list">${data.incidents
-        .map(
-          (incident) => `<li>
-            <button class="centre-card" type="button" data-incident="${esc(incident.id)}">
-              <span class="centre-card__icon" style="color:${CATEGORY_META.incident.color}">
-                ${icon("alert", 19)}
-              </span>
-              <span>
-                <span class="centre-card__name">${esc(incident.locationName || "Incident")}</span>
-                <span class="centre-card__meta">${esc(titleCase(incident.type))} · ${fmtNumber(incident.affectedPeople)} people affected</span>
-                <span class="flex flex-wrap" style="gap:6px;margin-top:6px">
-                  ${severityBadge(incident.severity)}
-                  ${statusBadge(incident.workflowStatus)}
-                  <span class="tiny muted">${esc(fmtDateTime(incident.submittedAt))}</span>
-                </span>
-              </span>
-              <span class="centre-card__right">
-                <span class="chevron">${icon("chevron", 17)}</span>
-              </span>
-            </button>
-          </li>`,
-        )
-        .join("")}</ul>`;
-      qsa("[data-incident]", incidentHost).forEach((button) => {
-        button.addEventListener("click", () => {
-          const incident = state.incidents.find((item) => item.id === button.dataset.incident);
-          if (!incident) return;
-          setOrigin(
-            { latitude: incident.latitude, longitude: incident.longitude, label: incident.locationName },
-            { navigate: true },
-          );
-        });
-      });
-    }
-  }
-
-  const dispatchHost = qs("#overviewDispatches");
-  if (dispatchHost) {
-    if (!data.recentDispatches?.length) {
-      dispatchHost.innerHTML = `<div class="empty" style="padding:28px"><h3>No dispatches yet</h3><p>Allocations appear here once a coordinator assigns resources.</p></div>`;
-    } else {
-      dispatchHost.innerHTML = `<ul class="list list--divide">${data.recentDispatches
-        .map(
-          (dispatch) => `<li style="padding:13px 18px">
-            <div class="between" style="gap:8px">
-              <strong style="font-size:0.84rem">${esc(dispatch.centreName)}</strong>
-              <span class="badge badge--neutral">${esc(titleCase(dispatch.status))}</span>
-            </div>
-            <div class="small muted" style="margin-top:3px">${esc(itemsSummary(dispatch.items))}</div>
-            <div class="tiny muted" style="margin-top:4px">${esc(dispatch.requestId)} · ${esc(fmtDateTime(dispatch.createdAt))}</div>
-          </li>`,
-        )
-        .join("")}</ul>`;
-    }
-  }
-
-  const map = maps.overview;
-  if (map?.ready) {
-    map.setIncidents(data.incidents || [], {
-      onClick: (incident) => {
-        setOrigin(
-          { latitude: incident.latitude, longitude: incident.longitude, label: incident.locationName },
-          { navigate: true },
-        );
-      },
-    });
-    map.setCentres(data.centres || [], { onClick: (centre) => openNearbyAtCentre(centre) });
-    const points = [
-      ...(data.incidents || []).map((item) => [item.latitude, item.longitude]),
-      ...(data.centres || []).map((item) => [item.latitude, item.longitude]),
-    ];
-    if (points.length) map.fit(points, { padding: [30, 30], maxZoom: 12 });
-    setText("#overviewMapCount", `${data.incidents?.length || 0} active · ${data.centres?.length || 0} centres`);
-  }
-}
-
-function setText(selector, text) {
-  const node = qs(selector);
-  if (node) node.textContent = String(text);
-}
-
-/* ------------------------------------------------------------------ */
-/* Report form                                                        */
-/* ------------------------------------------------------------------ */
-
-function initReportForm() {
-  const form = qs("#reportForm");
-  if (!form) return;
-
-  const description = qs("#rDescription");
-  description?.addEventListener("input", () => {
-    setText("#rDescriptionCount", `${description.value.length} / 2000`);
-  });
-
-  qsa("[data-qty]").forEach((input) => {
-    input.addEventListener("input", () => {
-      const checkbox = qs(`[data-resource="${input.dataset.qty}"]`);
-      if (Number(input.value) > 0 && checkbox) checkbox.checked = true;
-    });
-  });
-
-  const reportMap = new DrrasMap(qs("#reportMap"), { zoom: 12 });
-  maps.report = reportMap;
-  if (reportMap.ready) {
-    reportMap.onMapClick((latlng) => setReportPin(latlng.lat, latlng.lng, { pan: false }));
-    reportMap.setPickerMarker(DEFAULT_ORIGIN.latitude, DEFAULT_ORIGIN.longitude, {
-      draggable: true,
-      onMove: (lat, lon) => setReportPin(lat, lon, { pan: false, keepMarker: true }),
-    });
-    setReportPin(DEFAULT_ORIGIN.latitude, DEFAULT_ORIGIN.longitude, { pan: false, keepMarker: true, silent: true });
-  }
-
-  wirePlaceSearch(qs("#rPlaceSearch"), qs("#rPlaceSuggestions"), (place) => {
-    setReportPin(place.latitude, place.longitude, { pan: true, zoom: 14 });
-    const nameInput = qs("#rLocation");
-    if (nameInput) nameInput.value = place.shortName || place.name;
-    reportMap?.focus(place.latitude, place.longitude, 14);
-  });
-
-  qs("#rGeolocate")?.addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    await useGeolocation({
-      button,
-      onSuccess: (coords) => {
-        setReportPin(coords.latitude, coords.longitude, { pan: true, zoom: 15 });
-        const name = qs("#rLocation");
-        if (name && !name.value.trim()) name.value = "My current location";
-        reportMap?.focus(coords.latitude, coords.longitude, 15);
-      },
-      onError: (message) => setLocationStatus(message, true),
-    });
-  });
-
-  wireFilePicker();
-  loadReserveHint();
-
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    submitReport(form);
-  });
-
-  qs("#reportResult")?.addEventListener("click", (event) => {
-    const copy = event.target.closest("[data-copy]");
-    if (copy) {
-      copyText(copy.dataset.copy).then((ok) => {
-        if (ok) {
-          copy.textContent = "Copied";
-          setTimeout(() => {
-            copy.textContent = "Copy";
-          }, 1800);
-        }
-      });
-    }
-    const track = event.target.closest("[data-track]");
-    if (track) {
-      history.pushState(null, "", `#track/${encodeURIComponent(track.dataset.track)}`);
-      showView("track");
-      const input = qs("#trackId");
-      if (input) input.value = track.dataset.track;
-      loadTrackedRequest(track.dataset.track);
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    }
-    const another = event.target.closest("[data-report-another]");
-    if (another) {
-      resetReportForm();
-    }
-  });
-}
-
-function setReportPin(lat, lon, { pan = true, zoom = 14, keepMarker = false, silent = false } = {}) {
-  state.reportPin = { latitude: Number(lat), longitude: Number(lon) };
-  const latInput = qs("#rLat");
-  const lonInput = qs("#rLon");
-  if (latInput) latInput.value = Number(lat).toFixed(6);
-  if (lonInput) lonInput.value = Number(lon).toFixed(6);
-  if (!silent) {
-    setLocationStatus(
-      `Pin dropped at ${Number(lat).toFixed(4)}, ${Number(lon).toFixed(4)}. Check that it matches the location name.`,
-      false,
-    );
-  }
-  const map = maps.report;
-  if (!map?.ready) return;
-  if (keepMarker) {
-    map.movePicker(Number(lat), Number(lon));
-  } else {
-    map.setPickerMarker(Number(lat), Number(lon), {
-      draggable: true,
-      onMove: (nextLat, nextLon) => setReportPin(nextLat, nextLon, { pan: false, keepMarker: true }),
-    });
-  }
-  if (pan) map.focus(Number(lat), Number(lon), zoom);
-}
-
-function setLocationStatus(message, isError) {
-  const node = qs("#rLocationStatus");
-  if (!node) return;
-  node.textContent = message;
-  node.classList.toggle("text-danger", Boolean(isError));
-}
-
-function wirePlaceSearch(input, box, onPick) {
-  if (!input || !box) return;
-  const run = debounce(async (query) => {
-    if (query.trim().length < 2) {
-      box.hidden = true;
-      box.innerHTML = "";
-      return;
-    }
-    try {
-      const { results } = await api.places(query);
-      if (!results?.length) {
-        box.innerHTML = `<div style="padding:10px 12px;font-size:0.8rem;color:var(--muted)">No places found. You can also click the map to drop a pin.</div>`;
-        box.hidden = false;
-        return;
-      }
-      box.innerHTML = results
-        .map(
-          (place, index) => `<button type="button" data-place="${index}">
-            <span>${esc(place.shortName || place.name)}</span>
-            <small>${esc(place.name)}${place.source === "local" ? " · local gazetteer" : " · OpenStreetMap"}</small>
-          </button>`,
-        )
-        .join("");
-      box.hidden = false;
-      qsa("[data-place]", box).forEach((button) => {
-        button.addEventListener("click", () => {
-          const place = results[Number(button.dataset.place)];
-          box.hidden = true;
-          box.innerHTML = "";
-          input.value = place.shortName || place.name;
-          onPick(place);
-        });
-      });
-    } catch {
-      box.hidden = true;
-    }
-  }, 320);
-  input.addEventListener("input", () => run(input.value));
-  input.addEventListener("focus", () => {
-    if (box.innerHTML && input.value.trim().length >= 2) box.hidden = false;
-  });
-}
-
-async function useGeolocation({ button, onSuccess, onError }) {
-  if (!navigator.geolocation) {
-    onError("This browser does not support location access. Search for a place or click the map instead.");
+function renderIncidents(incidents) {
+  const host = $("#incidentsList");
+  if (!incidents.length) {
+    host.innerHTML = '<div class="empty-box">No approved incidents yet. Sample requests can be added from the admin dashboard.</div>';
     return;
   }
-  const original = button?.innerHTML;
-  if (button) {
-    button.disabled = true;
-    button.innerHTML = `<span class="spinner spinner--dark"></span> Locating…`;
-  }
-  navigator.geolocation.getCurrentPosition(
-    (position) => {
-      if (button) {
-        button.disabled = false;
-        button.innerHTML = original;
-      }
-      onSuccess({
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
-        accuracy: position.coords.accuracy,
-      });
-    },
-    (error) => {
-      if (button) {
-        button.disabled = false;
-        button.innerHTML = original;
-      }
-      const message =
-        error.code === error.PERMISSION_DENIED
-          ? "Location permission was denied. Search for a place or click the map instead."
-          : "Your location could not be determined. Search for a place or click the map instead.";
-      onError(message);
-    },
-    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 },
-  );
+  host.innerHTML = incidents.map((item) => `
+    <article class="list-item">
+      <div><h3>${escapeHtml(item.typeLabel)} · ${escapeHtml(item.locationName)}</h3>
+        <p>${escapeHtml(item.people)} people · ${escapeHtml(resourceSummary(item.resources))}</p>
+        <p>${escapeHtml(timeAgo(item.createdAt))} · ${escapeHtml(item.id)}</p></div>
+      <button class="btn btn-outline btn-sm" type="button" data-incident="${escapeHtml(item.id)}">Find help</button>
+    </article>`).join("");
+  $$("[data-incident]", host).forEach((button) => button.addEventListener("click", () => {
+    const incident = incidents.find((item) => item.id === button.dataset.incident);
+    if (incident) chooseIncident(incident);
+  }));
+  if (state.homeMap) state.homeMap.setIncidents(incidents, { onClick: chooseIncident });
+  $("#homeMapNote").textContent = `${incidents.length} active incident(s) · ${state.centres.length} sample centres`;
 }
 
-function wireFilePicker() {
-  const input = qs("#rFiles");
-  const drop = qs("#rFileDrop");
-  if (!input) return;
-  input.addEventListener("change", () => addFiles(Array.from(input.files || [])));
-  if (drop) {
-    ["dragenter", "dragover"].forEach((name) =>
-      drop.addEventListener(name, (event) => {
-        event.preventDefault();
-        drop.classList.add("is-dragover");
-      }),
-    );
-    ["dragleave", "drop"].forEach((name) =>
-      drop.addEventListener(name, (event) => {
-        event.preventDefault();
-        drop.classList.remove("is-dragover");
-      }),
-    );
-    drop.addEventListener("drop", (event) => addFiles(Array.from(event.dataTransfer?.files || [])));
+function renderDispatches(dispatches) {
+  const host = $("#dispatchList");
+  if (!dispatches.length) {
+    host.innerHTML = '<div class="empty-box">No dispatches yet. Approved requests awaiting allocation appear in the admin dashboard.</div>';
+    return;
   }
+  host.innerHTML = dispatches.map((item) => `
+    <div class="list-item"><div><h3>${escapeHtml(item.location)}</h3>
+      <p>${escapeHtml(item.centre)} · ${escapeHtml(resourceSummary(item.items))}</p></div>
+      <span class="badge ${item.status === "delivered" ? "badge-green" : "badge-blue"}">${escapeHtml(item.status)}</span></div>`).join("");
 }
 
-function addFiles(files) {
+function chooseIncident(incident) {
+  state.origin = {
+    latitude: incident.latitude, longitude: incident.longitude,
+    label: `${incident.typeLabel} at ${incident.locationName}`,
+  };
+  showView("nearby");
+}
+
+function ensureReportMap() {
+  if (!state.reportMap) {
+    state.reportMap = new MapView("reportMap", { center: [30.3165, 78.0322], zoom: 12 });
+    state.reportMap.pick((point) => {
+      $("#rLat").value = Number(point.lat).toFixed(6);
+      $("#rLon").value = Number(point.lng).toFixed(6);
+      $("#rLocationStatus").textContent = "Pin placed on the map. Add a recognisable location name.";
+      if (!$("#rLocation").value.trim()) $("#rPlaceSearch").focus();
+    });
+    $("#reportMap").addEventListener("picker-move", (event) => {
+      $("#rLat").value = Number(event.detail.latitude).toFixed(6);
+      $("#rLon").value = Number(event.detail.longitude).toFixed(6);
+    });
+  }
+  state.reportMap.refresh();
+}
+
+function setupReport() {
+  $("#resourceRows").innerHTML = RESOURCES.map(([key, label]) => `
+    <div class="resource-row"><label><input type="checkbox" data-resource="${key}"> ${label}</label>
+      <input type="number" min="0" max="100000" step="1" data-qty="${key}" placeholder="Qty" aria-label="${label} quantity"></div>`).join("");
+  $("#rDescription").addEventListener("input", () => {
+    $("#descCount").textContent = `${$("#rDescription").value.length} / 2000`;
+  });
+  $("#rPlaceSearch").addEventListener("input", debounce(searchPlaces, 350));
+  $("#rGeolocate").addEventListener("click", useGeolocation);
+  $("#rFiles").addEventListener("change", (event) => uploadFiles(Array.from(event.target.files || [])));
+  $("#reportForm").addEventListener("submit", submitReport);
+}
+
+async function searchPlaces() {
+  const text = $("#rPlaceSearch").value.trim();
+  const box = $("#placeSuggestions");
+  if (text.length < 2) { box.hidden = true; return; }
+  try {
+    const data = await api(`/api/places?q=${encodeURIComponent(text)}`);
+    if (!data.results.length) {
+      box.innerHTML = '<div class="suggestion">No matching place. Click the map instead.</div>';
+    } else {
+      box.innerHTML = data.results.map((item, index) => `
+        <button class="suggestion" type="button" data-place="${index}">${escapeHtml(item.name)}
+          <span class="hint">${item.source === "nominatim" ? "OpenStreetMap" : "local"}</span></button>`).join("");
+      $$("[data-place]", box).forEach((button) => button.addEventListener("click", () => {
+        const item = data.results[Number(button.dataset.place)];
+        applyPlace(item);
+      }));
+    }
+    box.hidden = false;
+  } catch { box.hidden = true; }
+}
+
+function applyPlace(item) {
+  $("#rLat").value = Number(item.latitude).toFixed(6);
+  $("#rLon").value = Number(item.longitude).toFixed(6);
+  $("#rLocation").value = item.name.slice(0, 200);
+  $("#rLocationStatus").textContent = `Selected: ${item.name}`;
+  $("#placeSuggestions").hidden = true;
+  ensureReportMap();
+  if (state.reportMap) state.reportMap.setPicker(item.latitude, item.longitude);
+}
+
+function useGeolocation() {
+  if (!navigator.geolocation) { toast("This browser does not support GPS location.", "error"); return; }
+  const button = $("#rGeolocate");
+  button.disabled = true;
+  navigator.geolocation.getCurrentPosition((position) => {
+    const { latitude, longitude } = position.coords;
+    $("#rLat").value = latitude.toFixed(6);
+    $("#rLon").value = longitude.toFixed(6);
+    $("#rLocationStatus").textContent = "GPS location captured. Add a location name.";
+    ensureReportMap();
+    if (state.reportMap) state.reportMap.setPicker(latitude, longitude);
+    button.disabled = false;
+  }, (error) => {
+    toast(`Could not read GPS: ${error.message}`, "error");
+    button.disabled = false;
+  }, { enableHighAccuracy: true, timeout: 10000 });
+}
+
+function readFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadFiles(files) {
   const allowed = ["image/jpeg", "image/png", "application/pdf"];
   for (const file of files) {
-    if (state.files.length >= MAX_FILES) {
-      showReportError(`You can attach up to ${MAX_FILES} files.`);
-      break;
-    }
-    if (!allowed.includes(file.type)) {
-      showReportError(`${file.name} is not a JPEG, PNG or PDF.`);
-      continue;
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      showReportError(`${file.name} is larger than 5 MB.`);
-      continue;
-    }
-    state.files.push(file);
+    if (state.evidence.length >= 3) { toast("Maximum three files.", "error"); break; }
+    if (!allowed.includes(file.type)) { toast(`${file.name}: only JPEG, PNG or PDF.`, "error"); continue; }
+    if (file.size > 5 * 1024 * 1024) { toast(`${file.name} is larger than 5 MB.`, "error"); continue; }
+    try {
+      const data = await readFile(file);
+      const response = await api("/api/uploads", {
+        method: "POST", body: { name: file.name, type: file.type, data },
+      });
+      state.evidence.push(response.evidence);
+      renderEvidence();
+    } catch (error) { toast(`Upload failed: ${error.message}`, "error"); }
   }
-  renderFileList();
-  const input = qs("#rFiles");
-  if (input) input.value = "";
+  $("#rFiles").value = "";
 }
 
-function renderFileList() {
-  const host = qs("#rEvidenceList");
-  if (!host) return;
-  host.innerHTML = state.files
-    .map((file, index) => {
-      const preview =
-        file.type.startsWith("image/") && file.__preview
-          ? `<img src="${file.__preview}" alt="">`
-          : `<span class="badge badge--neutral" style="font-size:0.62rem">${file.type === "application/pdf" ? "PDF" : "IMG"}</span>`;
-      return `<span class="evidence-chip" title="${esc(file.name)}">
-        ${preview}
-        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px">${esc(file.name)}</span>
-        <span class="muted tiny">${fmtBytes(file.size)}</span>
-        <button type="button" data-remove-file="${index}" aria-label="Remove ${esc(file.name)}">✕</button>
-      </span>`;
-    })
-    .join("");
-  qsa("[data-remove-file]", host).forEach((button) => {
-    button.addEventListener("click", () => {
-      state.files.splice(Number(button.dataset.removeFile), 1);
-      renderFileList();
-    });
-  });
-  state.files.forEach((file) => {
-    if (file.type.startsWith("image/") && !file.__preview) {
-      readFileAsDataUrl(file)
-        .then((dataUrl) => {
-          file.__preview = dataUrl;
-          renderFileList();
-        })
-        .catch(() => {});
-    }
-  });
+function renderEvidence() {
+  $("#evidenceList").innerHTML = state.evidence.map((item) => `
+    <span class="chip">${escapeHtml(item.name)} <button type="button" data-remove-evidence="${escapeHtml(item.id)}" aria-label="Remove">×</button></span>`).join("");
+  $$("[data-remove-evidence]").forEach((button) => button.addEventListener("click", () => {
+    state.evidence = state.evidence.filter((item) => item.id !== button.dataset.removeEvidence);
+    renderEvidence();
+  }));
 }
 
-function collectReportPayload() {
-  const type = qs("#rType").value;
-  const severity = qs('input[name="rSeverity"]:checked')?.value || "LOW";
-  const affectedPeople = Number(qs("#rAffected").value || 0);
-  const description = qs("#rDescription").value.trim();
-  const locationName = qs("#rLocation").value.trim();
-  const latitude = Number(qs("#rLat").value);
-  const longitude = Number(qs("#rLon").value);
-  const contactName = qs("#rContactName").value.trim();
-  const contactPhone = qs("#rContactPhone").value.trim();
-  const contactEmail = qs("#rContactEmail").value.trim();
-
-  const requiredResources = [];
-  const resourceQuantities = {};
-  qsa("[data-resource]").forEach((checkbox) => {
-    const category = checkbox.dataset.resource;
-    const qtyInput = qs(`[data-qty="${category}"]`);
-    const qty = Number(qtyInput?.value || 0);
-    if (checkbox.checked || qty > 0) {
-      requiredResources.push(category);
-      if (qty > 0) resourceQuantities[category] = Math.trunc(qty);
-    }
-  });
-
-  const problems = [];
-  if (!locationName) problems.push("Add a location name.");
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    problems.push("Place the location on the map (or use your GPS) so the request can be routed.");
-  }
-  if (description.length < 20) problems.push("Describe what is happening in at least 20 characters.");
-  if (!Number.isFinite(affectedPeople) || affectedPeople < 0) problems.push("Affected people must be zero or more.");
-  if (!contactPhone && !contactEmail) {
-    problems.push("Add a phone number or email so a coordinator can verify the report.");
-  }
-  return {
-    payload: {
-      type,
-      severity,
-      affectedPeople: Math.trunc(affectedPeople),
-      description,
-      locationName,
-      latitude,
-      longitude,
-      contactName,
-      contactPhone,
-      contactEmail,
-      requiredResources,
-      resourceQuantities,
-      evidence: [],
-    },
-    problems,
-  };
-}
-
-async function submitReport(form) {
-  showReportError("");
-  const submit = qs("#reportSubmit");
-  const { payload, problems } = collectReportPayload();
-  if (problems.length) {
-    showReportError(problems.join(" "));
+async function submitReport(event) {
+  event.preventDefault();
+  const errorBox = $("#reportError");
+  const button = $("#reportSubmit");
+  errorBox.hidden = true;
+  const latitude = Number($("#rLat").value);
+  const longitude = Number($("#rLon").value);
+  if (!$("#rLat").value || !$("#rLon").value || Number.isNaN(latitude) || Number.isNaN(longitude)) {
+    errorBox.textContent = "Place the disaster location on the map, use GPS, or search for a place.";
+    errorBox.hidden = false;
+    ensureReportMap();
     return;
   }
-
-  const original = submit.innerHTML;
-  submit.disabled = true;
-  submit.innerHTML = `<span class="spinner"></span> Submitting…`;
-
+  const resources = {};
+  $$("[data-resource]").forEach((checkbox) => {
+    if (!checkbox.checked) return;
+    const quantity = Number($(`[data-qty="${checkbox.dataset.resource}"]`).value || 1);
+    if (quantity > 0) resources[checkbox.dataset.resource] = Math.round(quantity);
+  });
+  if (!Object.keys(resources).length) {
+    errorBox.textContent = "Tick at least one resource and enter a quantity.";
+    errorBox.hidden = false;
+    return;
+  }
+  const payload = {
+    disasterType: $("#rType").value,
+    severity: $('input[name="severity"]:checked').value,
+    affectedPeople: Number($("#rAffected").value),
+    description: $("#rDescription").value.trim(),
+    locationName: $("#rLocation").value.trim(),
+    latitude, longitude,
+    contactName: $("#rContactName").value.trim(),
+    contactPhone: $("#rContactPhone").value.trim(),
+    contactEmail: $("#rContactEmail").value.trim(),
+    resources,
+    evidence: state.evidence.map((item) => item.id),
+  };
+  button.disabled = true;
+  button.textContent = "Submitting…";
   try {
-    if (state.files.length) {
-      submit.innerHTML = `<span class="spinner"></span> Uploading evidence…`;
-      const uploaded = [];
-      for (const file of state.files) {
-        const dataUrl = await readFileAsDataUrl(file);
-        const base64 = dataUrl.split(",")[1] || "";
-        const result = await api.uploadEvidence({
-          fileName: file.name,
-          mimeType: file.type,
-          data: base64,
-        });
-        uploaded.push(result.evidence.id);
-      }
-      payload.evidence = uploaded;
-    }
-    submit.innerHTML = `<span class="spinner"></span> Verifying report…`;
-    const response = await api.submitRequest(payload);
-    const record = response.request;
-    state.files = [];
-    renderFileList();
-    rememberRequest(record.id);
-    renderReceipt(record, response.verification);
-    submit.innerHTML = "Submitted";
-    setTimeout(() => {
-      submit.innerHTML = original;
-      submit.disabled = false;
-    }, 1200);
-    qs("#reportResult")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const data = await api("/api/requests", { method: "POST", body: payload });
+    state.evidence = [];
+    renderEvidence();
+    renderReceipt(data);
+    toast("Report submitted. Keep the request ID.", "success");
+    loadOverview();
   } catch (error) {
-    submit.disabled = false;
-    submit.innerHTML = original;
-    showReportError(error.message || "The report could not be submitted.");
+    errorBox.textContent = error.message;
+    errorBox.hidden = false;
+  } finally {
+    button.disabled = false;
+    button.innerHTML = 'Submit report <svg class="icon"><use href="#i-arrow"/></svg>';
   }
 }
 
-function showReportError(message) {
-  const box = qs("#reportError");
-  if (!box) return;
-  box.hidden = !message;
-  box.innerHTML = message
-    ? `<svg width="17" height="17" aria-hidden="true"><use href="#i-alert"/></svg><span>${esc(message)}</span>`
-    : "";
-}
-
-function renderReceipt(record, verification) {
-  const host = qs("#reportResult");
-  if (!host) return;
-  const status = STATUS_META[record.workflowStatus] || {};
+function renderReceipt(data) {
+  const request = data.request;
+  const host = $("#reportResult");
   host.hidden = false;
-  host.innerHTML = `
-    <div class="receipt">
-      <div class="flex" style="gap:10px">
-        <span style="color:var(--ok)">${icon("check-circle", 24)}</span>
-        <div>
-          <h2 style="font-size:1.1rem">Report received</h2>
-          <p class="muted small">Keep this request ID. It is the key to tracking and updating this report.</p>
-        </div>
-      </div>
-      <div class="receipt__id mt-16">
-        ${esc(record.id)}
-        <button class="copy-btn" type="button" data-copy="${esc(record.id)}">Copy</button>
-        ${statusBadge(record.workflowStatus, { large: true })}
-      </div>
-      <div class="receipt__grid">
-        <div class="receipt__item"><span>Incident</span>${esc(titleCase(record.type))} · ${esc(titleCase(record.severity))}</div>
-        <div class="receipt__item"><span>Location</span>${esc(record.locationName)}</div>
-        <div class="receipt__item"><span>Submitted</span>${esc(fmtDateTime(record.submittedAt))}</div>
-      </div>
-      <div class="notice notice--info mt-16">
-        ${icon("info", 17)}
-        <span>${esc(record.verification?.summary || verification?.summary || status.description || "Your report is queued for review.")}
-        ${record.duplicateOf ? ` Possible match: <span class="mono">${esc(record.duplicateOf)}</span>.` : ""}</span>
-      </div>
-      <div class="btn-row mt-16">
-        <button class="btn btn--primary btn--sm" type="button" data-track="${esc(record.id)}">Track this request</button>
-        <button class="btn btn--secondary btn--sm" type="button" data-report-another>Report another emergency</button>
-      </div>
-    </div>`;
+  host.innerHTML = `<div class="receipt"><p class="eyebrow">Report received</p>
+    <h2>Keep this request ID</h2><div class="receipt-id">${escapeHtml(request.id)}</div>
+    <p class="small">${escapeHtml(data.verification.summary)}</p>
+    <p class="small" style="margin-top:6px">Status: ${statusBadge(request.status, request.statusLabel)}</p>
+    <button class="btn btn-outline btn-sm" style="margin-top:10px" type="button" data-track-receipt="${escapeHtml(request.id)}">Track this report</button></div>`;
+  $("[data-track-receipt]").addEventListener("click", () => {
+    $("#trackId").value = request.id;
+    showView("my");
+    trackRequest();
+  });
+  host.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
-function resetReportForm() {
-  const form = qs("#reportForm");
-  form?.reset();
-  state.files = [];
-  renderFileList();
-  qsa('input[name="rSeverity"]').forEach((input) => {
-    input.checked = input.value === "CRITICAL";
-  });
-  setText("#rDescriptionCount", "0 / 2000");
-  setReportPin(DEFAULT_ORIGIN.latitude, DEFAULT_ORIGIN.longitude, { pan: true, zoom: 12, keepMarker: true, silent: true });
-  setLocationStatus("No pin placed yet — search for a place or click the map.", false);
-  const result = qs("#reportResult");
-  if (result) {
-    result.hidden = true;
-    result.innerHTML = "";
+function ensureNearbyMap() {
+  if (!state.nearbyMap) {
+    state.nearbyMap = new MapView("nearbyMap", { center: [30.3165, 78.0322], zoom: 11 });
   }
-  showReportError("");
-  state.reportPin = null;
-  qs("#rLat").value = "";
-  qs("#rLon").value = "";
-  maps.report?.clearPickerMarker();
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  state.nearbyMap.refresh();
 }
 
-async function loadReserveHint() {
-  try {
-    const { inventory } = await api.inventory();
-    const entries = Object.entries(inventory || {}).filter(([, value]) => Number(value) > 0);
-    if (!entries.length) return;
-    setText(
-      "#reserveHint",
-      "Central reserve: " + entries.map(([category, amount]) => `${resourceLabel(category)} ${amount}`).join(" · "),
-    );
-  } catch {
-    /* the hint is optional */
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* Nearby help                                                        */
-/* ------------------------------------------------------------------ */
-
-function initNearby() {
-  const map = new DrrasMap(qs("#nearbyMap"), { zoom: 12 });
-  maps.nearby = map;
-
-  qsa("#nCategories [data-category]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.category = button.dataset.category;
-      qsa("#nCategories [data-category]").forEach((other) => {
-        const active = other === button;
-        other.classList.toggle("is-active", active);
-        other.setAttribute("aria-pressed", String(active));
-      });
-      loadNearby();
-    });
-  });
-
-  qs("#nRadius")?.addEventListener("change", (event) => {
-    state.radius = Number(event.target.value);
-    loadNearby();
-  });
-  qs("#nOpenOnly")?.addEventListener("change", (event) => {
-    state.openOnly = event.target.checked;
-    loadNearby();
-  });
-  qs("#nResource")?.addEventListener("change", (event) => {
-    state.resource = event.target.value;
-    loadNearby();
-  });
-
-  wirePlaceSearch(qs("#nSearch"), qs("#nSuggestions"), (place) => {
-    setOrigin({ latitude: place.latitude, longitude: place.longitude, label: place.shortName || place.name });
-  });
-
-  qs("#nIncident")?.addEventListener("change", (event) => {
-    const incident = state.incidents.find((item) => item.id === event.target.value);
-    if (incident) {
-      setOrigin(
-        { latitude: incident.latitude, longitude: incident.longitude, label: incident.locationName },
-        { keepSelect: true },
-      );
-    }
-  });
-
-  qs("#nGeolocate")?.addEventListener("click", async (event) => {
-    await useGeolocation({
-      button: event.currentTarget,
-      onSuccess: (coords) => {
-        setOrigin({ latitude: coords.latitude, longitude: coords.longitude, label: "My current location" });
-      },
-      onError: (message) => {
-        setText("#nearbyMapNote", message);
-      },
-    });
-  });
-
-  qs("#nearbyList")?.addEventListener("click", (event) => {
-    const card = event.target.closest("[data-centre]");
-    if (card) selectCentre(card.dataset.centre);
-  });
-
-  qs("#nearbyDetail")?.addEventListener("click", (event) => {
-    const routeButton = event.target.closest("[data-route]");
-    if (routeButton) {
-      routeToCentre(routeButton.dataset.route, routeButton);
-    }
-    const clear = event.target.closest("[data-clear-route]");
-    if (clear) {
-      maps.nearby?.clearRoute();
-      state.selectedCentre = null;
-      qsa("[data-centre]").forEach((node) => node.classList.remove("is-selected"));
-      qs("#nearbyDetail").innerHTML = "";
-      maps.nearby?.selectCentre(null);
-    }
-  });
-
-  if (map.ready) {
-    map.onMapClick((latlng) => {
-      setOrigin({ latitude: latlng.lat, longitude: latlng.lng, label: "Map selection" });
-    });
-  }
-
-  loadIncidentsForNearby();
-  loadNearby();
-}
-
-async function loadIncidentsForNearby() {
-  try {
-    const overview = state.overview || (await api.overview());
-    state.overview = overview;
-    state.incidents = overview.incidents || [];
-    const select = qs("#nIncident");
-    if (select) {
-      select.innerHTML =
-        `<option value="">Choose an active incident…</option>` +
-        state.incidents
-          .map(
-            (incident) =>
-              `<option value="${esc(incident.id)}">${esc(incident.locationName)} · ${esc(titleCase(incident.type))}</option>`,
-          )
-          .join("");
-    }
-  } catch {
-    const select = qs("#nIncident");
-    if (select) select.innerHTML = `<option value="">Incidents unavailable</option>`;
-  }
-}
-
-function setOrigin(origin, { navigate = false, keepSelect = false } = {}) {
-  state.origin = origin;
-  state.selectedCentre = null;
-  const label = qs("#nOriginLabel");
-  if (label) label.textContent = `Origin: ${origin.label || "selected location"}`;
-  if (maps.nearby?.ready) {
-    maps.nearby.setOrigin(origin.latitude, origin.longitude);
-    maps.nearby.setRadius(origin.latitude, origin.longitude, state.radius);
-    maps.nearby.clearRoute();
-  }
-  if (!keepSelect) {
-    const select = qs("#nIncident");
-    if (select) select.value = "";
-  }
-  const detail = qs("#nearbyDetail");
-  if (detail) detail.innerHTML = "";
-  if (navigate) {
-    history.pushState(null, "", "#nearby");
-    showView("nearby");
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-  loadNearby();
+function setupNearby() {
+  $("#nearbyFilters").addEventListener("change", loadNearby);
+  $("#nearbyFilters").addEventListener("submit", (event) => event.preventDefault());
 }
 
 async function loadNearby() {
-  const list = qs("#nearbyList");
-  if (!list) return;
-  list.innerHTML = `<div class="loading-block"><span class="spinner spinner--dark"></span> Finding nearby help…</div>`;
-  try {
-    const result = await api.nearby({
-      lat: state.origin.latitude,
-      lon: state.origin.longitude,
-      category: state.category,
-      radius: state.radius,
-      availability: state.openOnly ? "open" : "all",
-      resource: state.resource || undefined,
-      limit: 30,
-    });
-    state.centres = result.centres || [];
-    renderNearby(result);
-  } catch (error) {
-    list.innerHTML = `<div class="empty"><h3>Help centres could not be loaded</h3><p>${esc(error.message)}</p></div>`;
-    setText("#nearbyCount", "Unavailable");
-  }
-}
-
-function renderNearby(result) {
-  const centres = result.centres || [];
-  const routing = result.routing || {};
-  const source = routing.resultSource || "estimate";
-  setText(
-    "#nearbyCount",
-    `${centres.length} centre${centres.length === 1 ? "" : "s"} within ${state.radius} km of ${state.origin.label || "the selected origin"}`,
-  );
-  const sourceBadge = qs("#nearbySourceBadge");
-  if (sourceBadge) {
-    sourceBadge.textContent = source === "osrm" ? "OSRM road routing" : "Road estimates";
-    sourceBadge.className = source === "osrm" ? "badge badge--ok" : "badge badge--warn";
-  }
-  const routingBadge = qs("#routingBadge");
-  if (routingBadge) {
-    routingBadge.textContent = source === "osrm" ? "Live OSRM routing" : "Routing unavailable · distances estimated";
-    routingBadge.className = source === "osrm" ? "badge badge--ok badge--lg" : "badge badge--warn badge--lg";
-  }
-  setText("#nearbyMapNote", routing.note || "");
-
-  const list = qs("#nearbyList");
-  if (!list) return;
-  if (!centres.length) {
-    list.innerHTML = `<div class="empty">
-      <svg width="30" height="30" aria-hidden="true"><use href="#i-pin"/></svg>
-      <h3>No centres match these filters</h3>
-      <p>Increase the radius, turn off the “open only” filter, or choose a different category.</p>
-    </div>`;
-  } else {
-    list.innerHTML = `<ul class="list">${centres
-      .map((centre) => {
-        const meta = CATEGORY_META[centre.category] || CATEGORY_META.other;
-        return `<li>
-          <button class="centre-card" type="button" data-centre="${esc(centre.id)}">
-            <span class="centre-card__icon" style="color:${meta.color}">${icon("pin", 19)}</span>
-            <span>
-              <span class="centre-card__name">${esc(centre.name)}</span>
-              <span class="centre-card__meta">${esc(meta.label)} · ${esc(centre.address || "")}</span>
-              <span class="flex flex-wrap" style="gap:6px;margin-top:6px">
-                ${availabilityBadge(centre.availability)}
-                <span class="stock-chips">${stockChips(centre.stock)}</span>
-              </span>
-            </span>
-            <span class="centre-card__right">
-              <span class="centre-card__distance">${fmtDistance(centre.distanceKm)}</span>
-              <span class="centre-card__eta">${icon("clock", 12)} ${fmtDuration(centre.durationMin)}${centre.distanceSource === "estimate" ? " · est." : ""}</span>
-              <span class="tiny muted">${esc(centre.bearing || "")}</span>
-            </span>
-          </button>
-        </li>`;
-      })
-      .join("")}</ul>`;
-  }
-
-  const map = maps.nearby;
-  if (map?.ready) {
-    map.setCentres(centres, {
-      onClick: (centre) => selectCentre(centre.id),
-      selectedId: state.selectedCentre?.id || null,
-    });
-    map.setOrigin(state.origin.latitude, state.origin.longitude, { pan: false });
-    map.setRadius(state.origin.latitude, state.origin.longitude, state.radius);
-    const points = [
-      [state.origin.latitude, state.origin.longitude],
-      ...centres.slice(0, 12).map((centre) => [centre.latitude, centre.longitude]),
-    ];
-    if (!state.selectedCentre) map.fit(points, { maxZoom: 13, padding: [36, 36] });
-  }
-}
-
-function stockChips(stock) {
-  const entries = Object.entries(stock || {}).filter(([, value]) => Number(value) > 0);
-  if (!entries.length) return `<span class="stock-chip">No stock recorded</span>`;
-  return entries
-    .sort(([a], [b]) => a.localeCompare(b))
-    .slice(0, 3)
-    .map(([category, amount]) => `<span class="stock-chip">${esc(resourceLabel(category))} ${fmtNumber(amount)}</span>`)
-    .join("");
-}
-
-function selectCentre(centreId) {
-  const centre = state.centres.find((item) => item.id === centreId);
-  if (!centre) return;
-  state.selectedCentre = centre;
-  qsa("[data-centre]").forEach((node) => {
-    node.classList.toggle("is-selected", node.dataset.centre === centreId);
+  ensureNearbyMap();
+  const params = new URLSearchParams({
+    lat: state.origin.latitude, lon: state.origin.longitude,
+    radius: $("#nRadius").value || 50,
+    category: $("#nCategory").value, availability: $("#nAvailability").value,
+    resource: $("#nResource").value,
   });
-  maps.nearby?.selectCentre(centreId);
-  maps.nearby?.focus(centre.latitude, centre.longitude, 14);
-  const meta = CATEGORY_META[centre.category] || CATEGORY_META.other;
-  const detail = qs("#nearbyDetail");
-  if (!detail) return;
-  detail.innerHTML = `<section class="card">
-    <div class="card__head">
-      <div>
-        <p class="eyebrow">${esc(meta.label)}</p>
-        <h2 class="card__title mt-8">${esc(centre.name)}</h2>
-        <p class="card__sub">${esc(centre.address || "Address not recorded")}</p>
-      </div>
-      ${availabilityBadge(centre.availability)}
-    </div>
-    <div class="card__body stack" style="gap:14px">
-      <div class="receipt__grid" style="margin-top:0">
-        <div class="receipt__item"><span>Road distance</span>${fmtDistance(centre.distanceKm)} ${centre.distanceSource === "estimate" ? '<span class="badge badge--warn" style="margin-left:4px">estimated</span>' : '<span class="badge badge--ok" style="margin-left:4px">routed</span>'}</div>
-        <div class="receipt__item"><span>Travel time</span>${fmtDuration(centre.durationMin)}</div>
-        <div class="receipt__item"><span>Direction</span>${esc(titleCase(centre.bearing || "—"))}</div>
-      </div>
-      <div>
-        <p class="tiny muted" style="margin-bottom:5px">Available resources</p>
-        <div class="chip-row">${stockChips(centre.stock)}</div>
-      </div>
-      ${centre.capacityNote ? `<p class="small muted"><strong>Capacity note:</strong> ${esc(centre.capacityNote)}</p>` : ""}
-      <div class="btn-row">
-        <button class="btn btn--primary btn--sm" type="button" data-route="${esc(centre.id)}">
-          ${icon("nav", 15)} Show route from origin
-        </button>
-        ${centre.phone ? `<a class="btn btn--secondary btn--sm" href="tel:${esc(centre.phone.replaceAll(" ", ""))}">${icon("phone", 15)} ${esc(centre.phone)}</a>` : ""}
-        <a class="btn btn--ghost btn--sm" target="_blank" rel="noopener"
-           href="https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=${state.origin.latitude}%2C${state.origin.longitude}%3B${centre.latitude}%2C${centre.longitude}">
-          Open directions ${icon("arrow", 15)}
-        </a>
-        <button class="btn btn--ghost btn--sm" type="button" data-clear-route>Close</button>
-      </div>
-      <div id="routeStatus" class="small muted"></div>
-    </div>
-  </section>`;
-  qs("#nearbyDetail")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-}
-
-async function routeToCentre(centreId, button) {
-  const centre = state.centres.find((item) => item.id === centreId);
-  if (!centre) return;
-  const status = qs("#routeStatus");
-  const original = button.innerHTML;
-  button.disabled = true;
-  button.innerHTML = `<span class="spinner"></span> Routing…`;
+  $("#nearbyOrigin").textContent = `Near ${state.origin.label}. Distances are road estimates or routed results, labelled on each card.`;
   try {
-    const route = await api.route(
-      state.origin.latitude,
-      state.origin.longitude,
-      centre.latitude,
-      centre.longitude,
-    );
-    if (Array.isArray(route.geometry) && route.geometry.length > 1) {
-      maps.nearby?.addRoute(route.geometry, { fit: true });
-      if (status) {
-        status.innerHTML = `<span class="text-ok"><strong>${fmtDistance(route.distanceKm)}</strong> · ${fmtDuration(route.durationMin)}</span> — road route from OSRM.`;
-      }
-    } else {
-      maps.nearby?.clearRoute();
-      if (status) {
-        status.innerHTML = `<span class="text-warn">Live routing is unavailable, so no route line is drawn.</span> Estimated road distance is ${fmtDistance(route.distanceKm)} (${fmtDuration(route.durationMin)}). Use “Open directions” for a live route.`;
-      }
+    const data = await api(`/api/nearby?${params}`);
+    $("#nearbyCount").textContent = `${data.count} centre(s)`;
+    state.centresForMap = data.centres || [];
+    renderNearby(data.centres || []);
+    if (state.nearbyMap) {
+      state.nearbyMap.setOrigin(state.origin.latitude, state.origin.longitude);
+      state.nearbyMap.setCentres(data.centres || [], { onClick: selectCentre, selectedId: state.selectedCentre });
+      state.nearbyMap.fitAll();
     }
+    const routed = (data.centres || []).filter((item) => item.distanceSource === "osrm").length;
+    $("#routingNote").innerHTML = routed
+      ? `<svg class="icon"><use href="#i-pin"/></svg> ${routed} of ${data.count} distances came from OSRM road routing.`
+      : '<svg class="icon"><use href="#i-pin"/></svg> OSRM is unavailable, so distances are clearly labelled estimates. No route line is drawn.';
   } catch (error) {
-    if (status) status.textContent = error.message;
-  } finally {
-    button.disabled = false;
-    button.innerHTML = original;
+    toast(`Could not load centres: ${error.message}`, "error");
   }
 }
 
-function openNearbyAtCentre(centre) {
-  setOrigin(
-    { latitude: centre.latitude, longitude: centre.longitude, label: centre.name },
-    { navigate: true },
-  );
-  setTimeout(() => selectCentre(centre.id), 350);
-}
-
-/* ------------------------------------------------------------------ */
-/* Track                                                              */
-/* ------------------------------------------------------------------ */
-
-function initTrack() {
-  qs("#trackForm")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const id = qs("#trackId").value.trim();
-    if (!id) return;
-    history.replaceState(null, "", `#track/${encodeURIComponent(id)}`);
-    loadTrackedRequest(id);
-  });
-  renderRecentIds();
-  qs("#recentIdsList")?.addEventListener("click", (event) => {
-    const chip = event.target.closest("[data-recent-id]");
-    if (!chip) return;
-    const input = qs("#trackId");
-    if (input) input.value = chip.dataset.recentId;
-    history.replaceState(null, "", `#track/${encodeURIComponent(chip.dataset.recentId)}`);
-    loadTrackedRequest(chip.dataset.recentId);
-  });
-}
-
-function rememberRequest(id) {
-  try {
-    const raw = localStorage.getItem(RECENT_KEY);
-    const list = raw ? JSON.parse(raw) : [];
-    const next = [id, ...list.filter((item) => item !== id)].slice(0, 5);
-    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
-  } catch {
-    /* storage may be unavailable */
-  }
-  renderRecentIds();
-}
-
-function renderRecentIds() {
-  const host = qs("#recentIds");
-  const list = qs("#recentIdsList");
-  if (!host || !list) return;
-  let ids = [];
-  try {
-    const raw = localStorage.getItem(RECENT_KEY);
-    ids = raw ? JSON.parse(raw) : [];
-  } catch {
-    ids = [];
-  }
-  if (!Array.isArray(ids) || !ids.length) {
-    host.hidden = true;
+function renderNearby(centres) {
+  const host = $("#nearbyList");
+  if (!centres.length) {
+    host.innerHTML = '<div class="empty-box">No centres match these filters.</div>';
     return;
   }
-  host.hidden = false;
-  list.innerHTML = ids
-    .map((id) => `<button class="chip chip--soft mono" type="button" data-recent-id="${esc(id)}">${esc(id)}</button>`)
-    .join("");
+  host.innerHTML = centres.map((centre) => `
+    <article class="centre-card" data-centre-card="${escapeHtml(centre.id)}">
+      <div class="between"><h3>${escapeHtml(centre.name)}</h3>
+        <span class="badge ${centre.availability === "available" ? "badge-green" : centre.availability === "closed" ? "badge-red" : "badge-orange"}">${escapeHtml(centre.availability)}</span></div>
+      <p>${escapeHtml(centre.categoryLabel)} · ${escapeHtml(centre.address)}</p>
+      <div class="centre-meta"><span><strong>${Number(centre.distanceKm).toFixed(1)} km</strong></span>
+        <span>${centre.durationMin == null ? "—" : `${centre.durationMin} min`}</span>
+        <span>${centre.distanceSource === "osrm" ? "road route" : "estimate"}</span></div>
+      <div class="stock-line">${escapeHtml(resourceSummary(centre.stock)) || "No stock recorded"}</div>
+      ${centre.phone ? `<div class="centre-meta"><span><svg class="icon"><use href="#i-phone"/></svg> ${escapeHtml(centre.phone)}</span></div>` : ""}
+    </article>`).join("");
+  $$("[data-centre-card]").forEach((card) => card.addEventListener("click", () => {
+    const centre = centres.find((item) => item.id === card.dataset.centreCard);
+    if (centre) selectCentre(centre);
+  }));
 }
 
-async function loadTrackedRequest(id) {
-  const host = qs("#trackResult");
-  if (!host) return;
-  host.innerHTML = `<section class="card card__pad"><div class="loading-block"><span class="spinner spinner--dark"></span> Loading request…</div></section>`;
+async function selectCentre(centre) {
+  state.selectedCentre = centre.id;
+  $$("[data-centre-card]").forEach((card) => card.classList.toggle("selected", card.dataset.centreCard === centre.id));
+  if (state.nearbyMap) {
+    state.nearbyMap.setCentres(state.centresForMap || [], { onClick: selectCentre, selectedId: centre.id });
+    state.nearbyMap.focus(centre.latitude, centre.longitude, 14);
+  }
   try {
-    const { request } = await api.requestStatus(id);
-    renderTrackedRequest(request);
+    const route = await api(`/api/route?fromLat=${state.origin.latitude}&fromLon=${state.origin.longitude}&toLat=${centre.latitude}&toLon=${centre.longitude}`);
+    if (state.nearbyMap) state.nearbyMap.drawRoute(route.geometry);
+    $("#routingNote").innerHTML = `<svg class="icon"><use href="#i-pin"/></svg> ${route.source === "osrm" ? "Live OSRM route" : "Estimated route"}: ${route.distanceKm} km · ${route.durationMin} min${route.source !== "osrm" ? " (routing unavailable)" : ""}.`;
   } catch (error) {
-    host.innerHTML = `<section class="card card__pad">
-      <div class="empty">
-        <svg width="32" height="32" aria-hidden="true"><use href="#i-search"/></svg>
-        <h3>Request not found</h3>
-        <p>${esc(error.message)} Check the ID and try again. IDs look like <span class="mono">REQ-1A2B3C4D5E</span>.</p>
-      </div>
-    </section>`;
+    toast(`Route unavailable: ${error.message}`, "error");
   }
 }
 
-function renderTrackedRequest(request) {
-  const host = qs("#trackResult");
-  if (!host) return;
-  const meta = STATUS_META[request.workflowStatus] || {};
-  const steps = buildTrackSteps(request.workflowStatus);
-  const notifications = request.notifications || [];
-  const allocations = request.allocations || [];
-
-  host.innerHTML = `<section class="card">
-    <div class="card__head">
-      <div>
-        <p class="eyebrow">Request ${esc(request.id)}</p>
-        <h2 class="card__title mt-8">${esc(request.locationName)}</h2>
-        <p class="card__sub">${esc(titleCase(request.type))} · submitted ${esc(fmtDateTime(request.submittedAt))}</p>
-      </div>
-      <div class="flex flex-wrap" style="gap:6px">${severityBadge(request.severity)}${statusBadge(request.workflowStatus, { large: true })}</div>
-    </div>
-    <div class="card__body stack">
-      <div class="notice notice--info">
-        ${icon("info", 17)}
-        <span><strong>${esc(meta.label || titleCase(request.workflowStatus))}.</strong> ${esc(request.verification?.summary || meta.description || "")}
-        ${request.duplicateOf ? `A similar report exists: <span class="mono">${esc(request.duplicateOf)}</span>. A coordinator will merge, link or keep both.` : ""}</span>
-      </div>
-
-      ${request.decisionMessage ? `<div class="notice ${request.workflowStatus === "rejected" ? "notice--danger" : "notice--ok"}">
-        ${icon(request.workflowStatus === "rejected" ? "alert" : "check-circle", 17)}
-        <span><strong>Message from the command centre.</strong><br>${esc(request.decisionMessage)}</span>
-      </div>` : ""}
-
-      <div class="receipt__grid" style="margin-top:0">
-        <div class="receipt__item"><span>People affected</span>${fmtNumber(request.affectedPeople)}</div>
-        <div class="receipt__item"><span>Resources requested</span>${esc(itemsSummary(request.resourceQuantities)) || esc((request.requiredResources || []).map(resourceLabel).join(" · ") || "—")}</div>
-        <div class="receipt__item"><span>Last update</span>${esc(fmtDateTime(request.updatedAt))}</div>
-      </div>
-
-      <div>
-        <p class="drawer-section__title" style="margin-bottom:10px">Status timeline</p>
-        <div class="stepper">
-          ${steps
-            .map(
-              (step) => `<div class="step ${step.state === "done" ? "is-done" : step.state === "current" ? "is-current" : "is-pending"}">
-                <span class="step__dot">${step.state === "done" ? icon("check", 13) : step.index}</span>
-                <span>
-                  <span class="step__title">${esc(step.label)}</span>
-                  ${step.note ? `<span class="step__desc">${esc(step.note)}</span>` : ""}
-                </span>
-              </div>`,
-            )
-            .join("")}
-        </div>
-      </div>
-
-      ${
-        allocations.length
-          ? `<div>
-              <p class="drawer-section__title" style="margin-bottom:8px">Resources assigned</p>
-              <ul class="list list--divide">
-                ${allocations
-                  .map(
-                    (allocation) => `<li style="padding:10px 0">
-                      <div class="between" style="gap:8px">
-                        <strong style="font-size:0.86rem">${esc(allocation.centreName)}</strong>
-                        <span class="badge badge--neutral">${esc(titleCase(allocation.status))}</span>
-                      </div>
-                      <div class="small muted" style="margin-top:2px">${esc(itemsSummary(allocation.items))}</div>
-                      <div class="tiny muted" style="margin-top:2px">
-                        ${fmtDistance(allocation.distanceKm)} · ${fmtDuration(allocation.durationMin)}${allocation.distanceSource === "estimate" ? " (estimated)" : ""}
-                        ${allocation.centrePhone ? ` · <a href="tel:${esc(allocation.centrePhone.replaceAll(" ", ""))}">${esc(allocation.centrePhone)}</a>` : ""}
-                      </div>
-                    </li>`,
-                  )
-                  .join("")}
-              </ul>
-            </div>`
-          : ""
-      }
-
-      ${
-        notifications.length
-          ? `<div>
-              <p class="drawer-section__title" style="margin-bottom:8px">Updates</p>
-              <ul class="timeline">
-                ${notifications
-                  .slice()
-                  .reverse()
-                  .map(
-                    (item) => `<li>
-                      <div class="timeline__time">${esc(fmtDateTime(item.createdAt))}</div>
-                      <div class="timeline__text">${esc(item.message)}</div>
-                    </li>`,
-                  )
-                  .join("")}
-              </ul>
-            </div>`
-          : ""
-      }
-    </div>
-  </section>`;
+function setupTrack() {
+  $("#trackForm").addEventListener("submit", (event) => { event.preventDefault(); trackRequest(); });
 }
+
+async function trackRequest() {
+  const id = $("#trackId").value.trim().toUpperCase();
+  const host = $("#trackResult");
+  if (!id) return;
+  host.innerHTML = '<p class="muted small">Looking up request…</p>';
+  try {
+    const data = await api(`/api/requests/${encodeURIComponent(id)}`);
+    renderTracked(data.request);
+  } catch (error) {
+    host.innerHTML = `<div class="notice notice-error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderTracked(request) {
+  const history = (request.history || []).map((item) => `
+    <div class="timeline-item"><span class="timeline-dot"></span><div>
+      <strong>${escapeHtml(item.label)}</strong>
+      <p>${escapeHtml(fmtDate(item.createdAt, true))}${item.note ? ` · ${escapeHtml(item.note)}` : ""}</p>
+    </div></div>`).join("");
+  const allocation = request.allocation
+    ? `<div class="notice notice-info"><strong>${escapeHtml(request.allocation.centreName || request.allocation.centreId)}</strong>
+       · ${escapeHtml(resourceSummary(request.allocation.items))} · ${escapeHtml(request.allocation.status)}</div>`
+    : "";
+  $("#trackResult").innerHTML = `<div class="stack">
+    <div class="between"><div><span class="hint">${escapeHtml(request.id)}</span><h2>${escapeHtml(request.typeLabel)} at ${escapeHtml(request.locationName)}</h2></div>
+      ${statusBadge(request.status, request.statusLabel)}</div>
+    <p class="small muted">${escapeHtml(request.description)}</p>
+    ${allocation}
+    <div><div class="section-title">History</div><div class="timeline">${history || '<p class="muted small">No history recorded.</p>'}</div></div>
+  </div>`;
+}
+
+async function init() {
+  setupNavigation();
+  setupReport();
+  setupNearby();
+  setupTrack();
+  state.homeMap = new MapView("homeMap", { center: [30.3165, 78.0322], zoom: 10 });
+  await loadOverview();
+  showView(location.hash.slice(1) || "home");
+}
+
+init();
