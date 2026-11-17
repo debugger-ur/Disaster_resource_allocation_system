@@ -1,0 +1,22 @@
+# Render Blueprint for DRRAS.
+# The free plan has an ephemeral filesystem: data resets on redeploy.
+# On a paid instance, add the disk block shown at the bottom of this file.
+services:
+  - type: web
+    name: drras
+    runtime: docker
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: DRRAS_ADMIN_PASSWORD
+        sync: false
+      - key: DRRAS_COOKIE_SECURE
+        value: "1"
+      # Optional: only set this when a separate frontend is deployed.
+      # - key: DRRAS_ALLOWED_ORIGIN
+      #   value: https://your-frontend.example.com
+# Paid plan only — uncomment to keep SQLite and uploads across deploys:
+#    disk:
+#      name: drras-data
+#      mountPath: /data
+#      sizeGB: 1
