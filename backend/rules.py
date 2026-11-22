@@ -211,3 +211,9 @@ def auto_approval(report: dict, risk: dict, duplicates: list[dict], settings: di
 def available_types() -> list[dict]:
     """Small helper used by the health/meta endpoint."""
     return [{"value": item, "label": DISASTER_LABELS[item]} for item in DISASTER_TYPES]
+"""Explainable duplicate detection, risk scoring and auto-approval rules.
+
+Nothing in this module rejects a report. Automation may only approve a report
+that meets every safe condition configured by an administrator; everything else
+goes to a person for review.
+"""
